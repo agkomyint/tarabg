@@ -7,7 +7,7 @@
   `bgzip`, with exact decompressed bytes; compressed bytes differ from v0.1
   and are typically smaller. Same-environment Linux benchmark vs bgzip 1.19:
   faster compression at every level (notably `-l 9` at identical size),
-  decompression at parity.
+  decompression at parity; see `benches/README.md` for the full table.
 - Streaming decompression reworked to single-pass block parsing (no
   reconstructed-block copy); `test`/`reindex`/range reads no longer buffer
   the whole file and stop early once fulfilled
