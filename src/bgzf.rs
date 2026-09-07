@@ -18,18 +18,31 @@ pub fn write_gzi<W: Write>(mut writer: W, entries: &[GziEntry]) -> Result<()> {
 
 /// Phase 3: count==0 (8 bytes total) is a valid empty index.
 pub fn read_gzi<R: Read>(mut reader: R) -> Result<Vec<GziEntry>> {
-    let mut bytes = Vec::new(); reader.read_to_end(&mut bytes)?;
-    if bytes.len() < 8 { bail!("truncated .gzi header"); }
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() < 8 {
+        bail!("truncated .gzi header");
+    }
     let count = u64::from_le_bytes(bytes[0..8].try_into()?) as usize;
-    if bytes.len() != 8 + count.checked_mul(16).context(".gzi entry count overflow")? { bail!("invalid .gzi length"); }
-    if count == 0 { return Ok(Vec::new()); }
+    if bytes.len() != 8 + count.checked_mul(16).context(".gzi entry count overflow")? {
+        bail!("invalid .gzi length");
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
     let mut entries = Vec::with_capacity(count);
     let mut previous = (0, 0);
     for i in 0..count {
         let offset = 8 + i * 16;
-        let entry = (u64::from_le_bytes(bytes[offset..offset + 8].try_into()?), u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into()?));
-        if entry.0 <= previous.0 || entry.1 <= previous.1 { bail!(".gzi entries are not strictly increasing"); }
-        previous = entry; entries.push(entry);
+        let entry = (
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into()?),
+            u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into()?),
+        );
+        if entry.0 <= previous.0 || entry.1 <= previous.1 {
+            bail!(".gzi entries are not strictly increasing");
+        }
+        previous = entry;
+        entries.push(entry);
     }
     Ok(entries)
 }
@@ -59,7 +72,12 @@ fn read_chunk(input: &mut impl Read) -> Result<Option<Vec<u8>>> {
 /// Reads input in batches of `batch_size` chunks, compresses each batch in
 /// parallel (when threads > 1), and writes the resulting blocks immediately.
 /// Peak memory is bounded to roughly `batch_size * MAX_UNCOMPRESSED_BLOCK`.
-pub fn compress<R: Read, W: Write>(mut input: R, mut output: W, level: u32, threads: usize) -> Result<()> {
+pub fn compress<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+    level: u32,
+    threads: usize,
+) -> Result<()> {
     let batch_size = threads.max(1) * 4;
     // Build the pool once, outside the batch loop.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -75,11 +93,14 @@ pub fn compress<R: Read, W: Write>(mut input: R, mut output: W, level: u32, thre
                 Some(chunk) => chunks.push(chunk),
             }
         }
-        if chunks.is_empty() { break; }
+        if chunks.is_empty() {
+            break;
+        }
 
         // Compress in parallel.
         let blocks: Vec<Vec<u8>> = pool.install(|| {
-            chunks.par_iter()
+            chunks
+                .par_iter()
                 .map(|c| compress_block(c, level))
                 .collect::<Result<Vec<_>>>()
         })?;
@@ -97,7 +118,12 @@ pub fn compress<R: Read, W: Write>(mut input: R, mut output: W, level: u32, thre
 ///
 /// Same bounded pipeline as `compress`, but accumulates `GziEntry` records
 /// as blocks are written, suitable for creating `.gzi` indexes.
-pub fn compress_indexed<R: Read, W: Write>(mut input: R, mut output: W, level: u32, threads: usize) -> Result<Vec<GziEntry>> {
+pub fn compress_indexed<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+    level: u32,
+    threads: usize,
+) -> Result<Vec<GziEntry>> {
     let batch_size = threads.max(1) * 4;
     // Build the pool once, outside the batch loop.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -119,11 +145,14 @@ pub fn compress_indexed<R: Read, W: Write>(mut input: R, mut output: W, level: u
                 Some(chunk) => chunks.push(chunk),
             }
         }
-        if chunks.is_empty() { break; }
+        if chunks.is_empty() {
+            break;
+        }
 
         // Compress in parallel.
         let blocks: Vec<Vec<u8>> = pool.install(|| {
-            chunks.par_iter()
+            chunks
+                .par_iter()
                 .map(|c| compress_block(c, level))
                 .collect::<Result<Vec<_>>>()
         })?;
@@ -180,9 +209,8 @@ fn read_decoded_block(r: &mut impl Read) -> Result<Option<(Vec<u8>, usize)>> {
     // Probe for clean EOF without consuming a partial block silently: a zero
     // first-byte read means end of stream; any later short read is truncation.
     let mut first = [0u8; 1];
-    match r.read(&mut first)? {
-        0 => return Ok(None),
-        _ => {}
+    if r.read(&mut first)? == 0 {
+        return Ok(None);
     }
     let mut header = [0u8; 18];
     header[0] = first[0];
@@ -273,12 +301,7 @@ pub fn decompress<R: Read, W: Write>(mut input: R, mut output: W) -> Result<()> 
 pub fn test<R: Read>(mut input: R) -> Result<()> {
     // Streaming integrity check: validate each block without accumulating
     // the full decompressed output (bounded ~65 KiB instead of input size).
-    loop {
-        match read_decoded_block(&mut input)? {
-            None => break,
-            Some(_) => {}
-        }
-    }
+    while read_decoded_block(&mut input)?.is_some() {}
     Ok(())
 }
 

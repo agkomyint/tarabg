@@ -1,9 +1,4 @@
-use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
-    process::Command,
-};
+use std::{fs, io::Write, path::PathBuf, process::Command};
 use tempfile::{tempdir, NamedTempFile};
 
 fn bgzip() -> Option<String> {
@@ -22,42 +17,105 @@ fn tarabg() -> &'static str {
 
 #[test]
 fn interoperates_with_bgzip_when_available() {
-    let Some(bgzip) = bgzip() else { eprintln!("skipping: bgzip is not installed"); return; };
+    let Some(bgzip) = bgzip() else {
+        eprintln!("skipping: bgzip is not installed");
+        return;
+    };
     let mut input = NamedTempFile::new().unwrap();
     input.write_all(&vec![b'A'; 100_000]).unwrap();
     let tara = tarabg();
-    let compressed = Command::new(tara).args(["-l", "6", "-c", input.path().to_str().unwrap()]).output().unwrap();
+    let compressed = Command::new(tara)
+        .args(["-l", "6", "-c", input.path().to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(compressed.status.success());
     let mut tara_gz = NamedTempFile::new().unwrap();
-    tara_gz.write_all(&compressed.stdout).unwrap(); tara_gz.flush().unwrap();
-    assert!(Command::new(&bgzip).args(["-t", tara_gz.path().to_str().unwrap()]).status().unwrap().success());
-    let decoded = Command::new(&bgzip).args(["-d", "-c", tara_gz.path().to_str().unwrap()]).output().unwrap();
+    tara_gz.write_all(&compressed.stdout).unwrap();
+    tara_gz.flush().unwrap();
+    assert!(Command::new(&bgzip)
+        .args(["-t", tara_gz.path().to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    let decoded = Command::new(&bgzip)
+        .args(["-d", "-c", tara_gz.path().to_str().unwrap()])
+        .output()
+        .unwrap();
     assert_eq!(decoded.stdout, std::fs::read(input.path()).unwrap());
 
-    let native = Command::new(&bgzip).args(["-l", "6", "-c", input.path().to_str().unwrap()]).output().unwrap();
+    let native = Command::new(&bgzip)
+        .args(["-l", "6", "-c", input.path().to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(native.status.success());
     let mut native_gz = NamedTempFile::new().unwrap();
-    native_gz.write_all(&native.stdout).unwrap(); native_gz.flush().unwrap();
-    let tara_decoded = Command::new(tara).args(["-d", "-c", native_gz.path().to_str().unwrap()]).output().unwrap();
+    native_gz.write_all(&native.stdout).unwrap();
+    native_gz.flush().unwrap();
+    let tara_decoded = Command::new(tara)
+        .args(["-d", "-c", native_gz.path().to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(tara_decoded.status.success());
     assert_eq!(tara_decoded.stdout, std::fs::read(input.path()).unwrap());
 
     let tara_index = NamedTempFile::new().unwrap();
-    let indexed = Command::new(tara).args(["-i", "-I", tara_index.path().to_str().unwrap(), "-c", input.path().to_str().unwrap()]).output().unwrap();
+    let indexed = Command::new(tara)
+        .args([
+            "-i",
+            "-I",
+            tara_index.path().to_str().unwrap(),
+            "-c",
+            input.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
     assert!(indexed.status.success());
     let mut indexed_gz = NamedTempFile::new().unwrap();
-    indexed_gz.write_all(&indexed.stdout).unwrap(); indexed_gz.flush().unwrap();
+    indexed_gz.write_all(&indexed.stdout).unwrap();
+    indexed_gz.flush().unwrap();
     let expected = &std::fs::read(input.path()).unwrap()[65_270..65_370];
-    let native_range = Command::new(&bgzip).args(["-b", "65270", "-s", "100", "-I", tara_index.path().to_str().unwrap(), indexed_gz.path().to_str().unwrap()]).output().unwrap();
+    let native_range = Command::new(&bgzip)
+        .args([
+            "-b",
+            "65270",
+            "-s",
+            "100",
+            "-I",
+            tara_index.path().to_str().unwrap(),
+            indexed_gz.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
     assert!(native_range.status.success());
     assert_eq!(native_range.stdout, expected);
 
     let native_index = NamedTempFile::new().unwrap();
-    let native_indexed = Command::new(&bgzip).args(["-i", "-I", native_index.path().to_str().unwrap(), "-c", input.path().to_str().unwrap()]).output().unwrap();
+    let native_indexed = Command::new(&bgzip)
+        .args([
+            "-i",
+            "-I",
+            native_index.path().to_str().unwrap(),
+            "-c",
+            input.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
     assert!(native_indexed.status.success());
     let mut native_indexed_gz = NamedTempFile::new().unwrap();
-    native_indexed_gz.write_all(&native_indexed.stdout).unwrap(); native_indexed_gz.flush().unwrap();
-    let tara_range = Command::new(tara).args(["-b", "65270", "-s", "100", "-I", native_index.path().to_str().unwrap(), native_indexed_gz.path().to_str().unwrap()]).output().unwrap();
+    native_indexed_gz.write_all(&native_indexed.stdout).unwrap();
+    native_indexed_gz.flush().unwrap();
+    let tara_range = Command::new(tara)
+        .args([
+            "-b",
+            "65270",
+            "-s",
+            "100",
+            "-I",
+            native_index.path().to_str().unwrap(),
+            native_indexed_gz.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
     assert!(tara_range.status.success());
     assert_eq!(tara_range.stdout, expected);
 }
@@ -133,11 +191,14 @@ fn tarabg_force_flag() {
     // Without -f: should fail because output exists.
     // Re-create input since it would be removed on success.
     let status_no_force = Command::new(tara)
-        .arg("-k")                           // keep input so we can try again
+        .arg("-k") // keep input so we can try again
         .arg(input_path.to_str().unwrap())
         .status()
         .unwrap();
-    assert!(!status_no_force.success(), "expected failure when output exists without -f");
+    assert!(
+        !status_no_force.success(),
+        "expected failure when output exists without -f"
+    );
     // Original gz remains untouched.
     assert_eq!(fs::read(&gz_path).unwrap(), b"old content");
 

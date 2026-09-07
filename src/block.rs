@@ -2,17 +2,18 @@
 
 use anyhow::{bail, Context, Result};
 use crc32fast::Hasher;
-use libdeflater::{Compressor, CompressionLvl, Decompressor};
+use libdeflater::{CompressionLvl, Compressor, Decompressor};
 
 /// Conservative maximum used by bgzip and guaranteed to fit even when stored.
 pub const MAX_UNCOMPRESSED_BLOCK: usize = 65_280;
 pub const BGZF_EOF: [u8; 28] = [
-    31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, 66, 67, 2, 0, 27, 0,
-    3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, 66, 67, 2, 0, 27, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 pub fn compress_block(input: &[u8], level: u32) -> Result<Vec<u8>> {
-    if input.len() > MAX_UNCOMPRESSED_BLOCK { bail!("input is larger than one BGZF block"); }
+    if input.len() > MAX_UNCOMPRESSED_BLOCK {
+        bail!("input is larger than one BGZF block");
+    }
     // Level 0 is stored (no compression): bypass the deflate encoder entirely.
     // A single raw stored sub-block holds up to 65535 bytes, so any BGZF chunk
     // fits. Output remains valid deflate accepted by bgzip/inflate.
@@ -21,12 +22,14 @@ pub fn compress_block(input: &[u8], level: u32) -> Result<Vec<u8>> {
     }
     // libdeflate levels are 1-12; map tarabg/bgzip levels 1:1 so the same
     // flag means the same effort class in both tools.
-    if level < 1 || level > 9 {
+    if !(1..=9).contains(&level) {
         bail!("invalid compression level {level}");
     }
     let payload = deflate_compress_fresh(input, level)?;
     let total = 18 + payload.len() + 8;
-    if total > 65_536 { bail!("compressed BGZF block exceeds 64 KiB"); }
+    if total > 65_536 {
+        bail!("compressed BGZF block exceeds 64 KiB");
+    }
 
     let mut crc = Hasher::new();
     crc.update(input);
@@ -106,32 +109,48 @@ fn inflate_exact(payload: &[u8], expected_size: usize) -> Result<Vec<u8>> {
 pub fn decompress_bgzf(mut data: &[u8]) -> Result<Vec<u8>> {
     let mut result = Vec::new();
     while !data.is_empty() {
-        if data.len() < 18 || data[0..4] != [31, 139, 8, 4] { bail!("not a BGZF block"); }
+        if data.len() < 18 || data[0..4] != [31, 139, 8, 4] {
+            bail!("not a BGZF block");
+        }
         let xlen = u16::from_le_bytes([data[10], data[11]]) as usize;
-        if xlen < 6 || data.len() < 12 + xlen + 8 { bail!("truncated BGZF header"); }
+        if xlen < 6 || data.len() < 12 + xlen + 8 {
+            bail!("truncated BGZF header");
+        }
         let mut cursor = 12;
         let mut block_size = None;
         while cursor < 12 + xlen {
-            if cursor + 4 > 12 + xlen { bail!("malformed BGZF extra field"); }
+            if cursor + 4 > 12 + xlen {
+                bail!("malformed BGZF extra field");
+            }
             let slen = u16::from_le_bytes([data[cursor + 2], data[cursor + 3]]) as usize;
-            if cursor + 4 + slen > 12 + xlen { bail!("malformed BGZF subfield"); }
+            if cursor + 4 + slen > 12 + xlen {
+                bail!("malformed BGZF subfield");
+            }
             if &data[cursor..cursor + 2] == b"BC" && slen == 2 {
-                block_size = Some(u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize + 1);
+                block_size =
+                    Some(u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize + 1);
             }
             cursor += 4 + slen;
         }
         let size = block_size.context("missing BGZF BC subfield")?;
-        if size > data.len() || size < 26 { bail!("truncated or invalid BGZF block size"); }
+        if size > data.len() || size < 26 {
+            bail!("truncated or invalid BGZF block size");
+        }
         let payload_start = 12 + xlen;
         let payload_end = size - 8;
         let expected_crc = u32::from_le_bytes(data[payload_end..payload_end + 4].try_into()?);
         let expected_size = u32::from_le_bytes(data[payload_end + 4..size].try_into()?) as usize;
         // Phase 5: reject blocks claiming more than 65536 uncompressed bytes
         // before allocating the output buffer.
-        if expected_size > 65_536 { bail!("BGZF ISIZE exceeds 65536"); }
+        if expected_size > 65_536 {
+            bail!("BGZF ISIZE exceeds 65536");
+        }
         let decoded = inflate_exact(&data[payload_start..payload_end], expected_size)?;
-        let mut crc = Hasher::new(); crc.update(&decoded);
-        if crc.finalize() != expected_crc { bail!("BGZF CRC32 mismatch"); }
+        let mut crc = Hasher::new();
+        crc.update(&decoded);
+        if crc.finalize() != expected_crc {
+            bail!("BGZF CRC32 mismatch");
+        }
         // EOF marker (ISIZE == 0, empty deflate) may appear mid-stream; treat as no-op.
         result.extend_from_slice(&decoded);
         data = &data[size..];

@@ -1,6 +1,8 @@
-#[path = "../src/block.rs"] mod block;
 #[allow(dead_code)]
-#[path = "../src/bgzf.rs"] mod bgzf;
+#[path = "../src/bgzf.rs"]
+mod bgzf;
+#[path = "../src/block.rs"]
+mod block;
 use std::io::Cursor;
 
 // ── Existing tests ────────────────────────────────────────────────────────────
@@ -10,7 +12,9 @@ fn all_levels_roundtrip() {
     let payload = (0..200_000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
     for level in 0..=9 {
         let mut stream = Vec::new();
-        for chunk in payload.chunks(block::MAX_UNCOMPRESSED_BLOCK) { stream.extend(block::compress_block(chunk, level).unwrap()); }
+        for chunk in payload.chunks(block::MAX_UNCOMPRESSED_BLOCK) {
+            stream.extend(block::compress_block(chunk, level).unwrap());
+        }
         stream.extend(block::BGZF_EOF);
         assert_eq!(block::decompress_bgzf(&stream).unwrap(), payload);
     }
@@ -31,10 +35,18 @@ fn gzi_roundtrip_and_random_access() {
     let entries = bgzf::compress_indexed(Cursor::new(&payload), &mut compressed, 6, 2).unwrap();
     assert_eq!(entries.len(), 3); // The first (0, 0) block is implicit in .gzi.
     assert_eq!(bgzf::reindex(Cursor::new(&compressed)).unwrap(), entries);
-    let mut gzi = Vec::new(); bgzf::write_gzi(&mut gzi, &entries).unwrap();
+    let mut gzi = Vec::new();
+    bgzf::write_gzi(&mut gzi, &entries).unwrap();
     assert_eq!(bgzf::read_gzi(Cursor::new(gzi)).unwrap(), entries);
     let mut range = Vec::new();
-    bgzf::decompress_range(Cursor::new(compressed), &mut range, 65_270, Some(100), Some(&entries)).unwrap();
+    bgzf::decompress_range(
+        Cursor::new(compressed),
+        &mut range,
+        65_270,
+        Some(100),
+        Some(&entries),
+    )
+    .unwrap();
     assert_eq!(range, payload[65_270..65_370]);
 }
 
@@ -64,7 +76,9 @@ fn single_byte_roundtrip() {
 /// Compress exactly MAX_UNCOMPRESSED_BLOCK bytes (block boundary), verify roundtrip.
 #[test]
 fn exact_block_boundary() {
-    let input: Vec<u8> = (0..block::MAX_UNCOMPRESSED_BLOCK).map(|i| (i % 256) as u8).collect();
+    let input: Vec<u8> = (0..block::MAX_UNCOMPRESSED_BLOCK)
+        .map(|i| (i % 256) as u8)
+        .collect();
     let mut compressed = Vec::new();
     bgzf::compress(Cursor::new(&input), &mut compressed, 6, 1).unwrap();
     let mut out = Vec::new();

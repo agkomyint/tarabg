@@ -6,7 +6,7 @@ use clap::Parser;
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
 };
 
@@ -82,7 +82,7 @@ struct Args {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn open_input(path: &PathBuf) -> Result<Box<dyn Read>> {
+fn open_input(path: &Path) -> Result<Box<dyn Read>> {
     if path.as_os_str() == "-" {
         Ok(Box::new(io::stdin()))
     } else {
@@ -110,14 +110,13 @@ fn stripped_suffix(path: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Write `data` to `final_path`, using a `.tmp` intermediary. Respects `force`.
-fn write_file_atomic(data: &[u8], final_path: &PathBuf, force: bool) -> Result<()> {
+fn write_file_atomic(data: &[u8], final_path: &Path, force: bool) -> Result<()> {
     check_overwrite(final_path, force)?;
     let tmp_path = tmp_path_for(final_path);
     {
         let mut f = BufWriter::with_capacity(
             1 << 20,
-            File::create(&tmp_path)
-                .with_context(|| format!("creating {}", tmp_path.display()))?,
+            File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?,
         );
         f.write_all(data)?;
         f.flush()?;
@@ -127,7 +126,7 @@ fn write_file_atomic(data: &[u8], final_path: &PathBuf, force: bool) -> Result<(
     Ok(())
 }
 
-fn check_overwrite(final_path: &PathBuf, force: bool) -> Result<()> {
+fn check_overwrite(final_path: &Path, force: bool) -> Result<()> {
     if final_path.exists() && !force {
         bail!(
             "output file already exists: {}  (use -f to overwrite)",
@@ -137,22 +136,22 @@ fn check_overwrite(final_path: &PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn tmp_path_for(final_path: &PathBuf) -> PathBuf {
+fn tmp_path_for(final_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tmp", final_path.display()))
 }
 
 /// Stream `produce` directly into a tmp file, then atomically rename.
 /// Avoids buffering the entire (possibly multi-GB) output in RAM.
 fn stream_file_atomic(
-    final_path: &PathBuf,
+    final_path: &Path,
     force: bool,
     produce: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
 ) -> Result<()> {
     check_overwrite(final_path, force)?;
     let tmp_path = tmp_path_for(final_path);
     {
-        let file = File::create(&tmp_path)
-            .with_context(|| format!("creating {}", tmp_path.display()))?;
+        let file =
+            File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?;
         let mut w = BufWriter::with_capacity(1 << 20, file);
         produce(&mut w)?;
         w.flush()?;
@@ -166,7 +165,7 @@ fn stream_file_atomic(
 // Per-file processing
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn process_one(path: &PathBuf, args: &Args) -> Result<()> {
+fn process_one(path: &Path, args: &Args) -> Result<()> {
     let use_stdin = is_stdin(path);
 
     // ── -b / -s random-access range ──────────────────────────────────────────
@@ -174,16 +173,22 @@ fn process_one(path: &PathBuf, args: &Args) -> Result<()> {
         if use_stdin {
             bail!("-b/-s random access requires a file input, not stdin");
         }
-        let index_path = args
-            .index_name
-            .clone()
-            .or_else(|| {
-                let p = PathBuf::from(format!("{}.gzi", path.display()));
-                if p.exists() { Some(p) } else { None }
-            });
+        let index_path = args.index_name.clone().or_else(|| {
+            let p = PathBuf::from(format!("{}.gzi", path.display()));
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        });
         let index = index_path
             .filter(|p| p.exists())
-            .map(|p| bgzf::read_gzi(BufReader::with_capacity(1 << 20, File::open(&p).context("opening .gzi index")?)))
+            .map(|p| {
+                bgzf::read_gzi(BufReader::with_capacity(
+                    1 << 20,
+                    File::open(&p).context("opening .gzi index")?,
+                ))
+            })
             .transpose()?;
         let input = open_input(path)?;
         let stdout = io::stdout();
@@ -220,7 +225,13 @@ fn process_one(path: &PathBuf, args: &Args) -> Result<()> {
     }
 
     // ── Determine output mode: stdout vs file ─────────────────────────────────
-    let to_stdout = args.stdout || use_stdin || args.output.as_deref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+    let to_stdout = args.stdout
+        || use_stdin
+        || args
+            .output
+            .as_deref()
+            .map(|p| p.as_os_str() == "-")
+            .unwrap_or(false);
 
     if to_stdout {
         // ── Stdout pipeline ───────────────────────────────────────────────────
@@ -229,7 +240,8 @@ fn process_one(path: &PathBuf, args: &Args) -> Result<()> {
         let mut output = BufWriter::with_capacity(1 << 20, stdout.lock());
 
         if args.index {
-            let entries = bgzf::compress_indexed(input, &mut output, args.level, args.threads as usize)?;
+            let entries =
+                bgzf::compress_indexed(input, &mut output, args.level, args.threads as usize)?;
             let index_path = if let Some(ref p) = args.index_name {
                 p.clone()
             } else if !use_stdin {
