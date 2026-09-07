@@ -54,7 +54,7 @@ tarabg --version
 | `-b`  | `--offset`      | Start decompression at uncompressed byte offset               | ✅ Done     |
 | `-s`  | `--size`        | Write at most N uncompressed bytes (used with `-b`)           | ✅ Done     |
 |       | `--binary`      | Treat input as binary (accepted; TaraBG always uses binary)   | ✅ No-op    |
-| `-g`  | `--rebgzip`     | Re-bgzip: not yet implemented                                 | ⚠️ Stub    |
+| `-g`  | `--rebgzip`     | Re-block a file per a `.gzi` index (requires `-I`)            | ✅ Done     |
 | `-h`  | `--help`        | Print help                                                    | ✅ Done (clap) |
 |       | `--version`     | Print version                                                 | ✅ Done (clap) |
 
@@ -115,6 +115,25 @@ Creating an index with `-i` enables random access without decompressing the whol
 file. The `.gzi` format stores pairs of `(compressed_offset, uncompressed_offset)`
 for each block boundary after the first. TaraBG-produced indexes are accepted by
 `bgzip` and vice versa.
+
+## Re-bgzip (`-g`)
+
+`tarabg -g -I index.gzi input > output.gz` compresses `input` as opaque bytes
+(without decompressing it first), splitting BGZF blocks at the uncompressed
+offsets listed in the index — the same behavior as `bgzip -g`. This re-blocks
+an existing file, for example at a new compression level, while preserving the
+original uncompressed block boundaries:
+
+```bash
+# Recompress data.bin.gz at level 1 with the original blocking
+tarabg -g -l 1 -I data.bin.gz.gzi -c data.bin.gz > data.l1.gz
+```
+
+Rules (matching `bgzip`): `-I` is mandatory (no index auto-discovery);
+`-g` cannot be combined with `-i`/`-r`; `-d`, `-t`, and `-b`/`-s` take
+precedence over `-g` when given together. An empty index falls back to default
+blocking. In file mode the output is `<input>.gz` and the input is removed
+unless `-k` is given.
 
 ## Streaming
 

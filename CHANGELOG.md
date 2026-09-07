@@ -14,7 +14,10 @@
 
 ## [Unreleased]
 
-- `-g`/`--rebgzip` full implementation
+- `-g`/`--rebgzip`: re-block a file per a `.gzi` index (requires `-I`),
+  matching black-box bgzip 1.19 behavior (opaque recompression, `-i`/`-r`
+  rejected, `-d`/`-t`/`-b` precedence, empty-index fallback). 8 differential
+  tests incl. identical block splits vs native bgzip
 - Fuzzing targets for BGZF and `.gzi` parsers
 - Signed/checksummed release artifacts built by CI
 

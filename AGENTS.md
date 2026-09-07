@@ -2,7 +2,7 @@
 
 ## Current implementation status (updated 2026-09-07)
 
-**19/19 tests passing. `cargo build --release` and `cargo clippy` clean.**
+**27/27 tests passing. `cargo build --release` and `cargo clippy` clean.**
 
 ### What is fully implemented
 
@@ -16,7 +16,9 @@
 - Multiple positional input files (processed independently, errors reported per-file)
 - `.gzi` index create (`-i`), rebuild (`-r`), default naming, and random reads (`-b`/`-s`)
 - Long-option aliases for every flag (`--stdout`, `--decompress`, etc.)
-- `--binary` accepted as no-op; `-g`/`--rebgzip` stubs with a clear error
+- `--binary` accepted as no-op; `-g`/`--rebgzip` re-blocks per a `.gzi` index
+  (requires `-I`, rejects `-i`/`-r`, `-d`/`-t`/`-b` win) with native-bgzip
+  differential tests
 - Format hardening: ISIZE > 65536 rejected, malformed headers rejected, EOF markers
   in the middle of a stream skipped as no-ops
 - CI: `.github/workflows/ci.yml` tests on Ubuntu, macOS, and Windows; includes
@@ -24,22 +26,21 @@
 
 ### What is NOT yet done (remaining planned work)
 
-- `-g`/`--rebgzip` full implementation (currently exits with "not yet implemented")
 - Fuzzing targets (cargo-fuzz / libFuzzer for BGZF and .gzi parsers)
 - Native Linux performance baseline (infrastructure in `benches/` is ready)
 - Signed/checksummed multi-platform release artifacts from CI
 
 ### One-line status for other agents
 
-> **Phases 1–8 of ROADMAP.md are structurally complete. Only `-g`/`--rebgzip`,
-> fuzzing, and a native perf baseline remain before "full drop-in" can be claimed.**
+> **All CLI flags are implemented. Only fuzzing and a native perf baseline
+> remain before "full drop-in" can be claimed.**
 
 ---
 
 ## Product direction
 
 TaraBG is a clean-room, command-line-compatible replacement for HTSlib `bgzip`.
-Do not claim full drop-in status until `-g`/`--rebgzip` is implemented, fuzzing
+Do not claim full drop-in status until fuzzing
 is in CI, and a native same-environment benchmark exists.
 
 ## Non-negotiable correctness contract

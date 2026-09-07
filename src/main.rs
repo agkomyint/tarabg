@@ -69,7 +69,8 @@ struct Args {
     #[arg(long = "binary")]
     binary: bool,
 
-    /// Re-bgzip: not yet implemented.
+    /// Re-bgzip: compress the input as opaque bytes, splitting BGZF blocks
+    /// at the uncompressed offsets of a `.gzi` index (requires `-I`).
     #[arg(short = 'g', long = "rebgzip")]
     rebgzip: bool,
 
@@ -97,6 +98,20 @@ fn is_stdin(path: &std::path::Path) -> bool {
     path.as_os_str() == "-"
 }
 
+/// Load the `.gzi` index required by `--rebgzip`.
+///
+/// Unlike random-access reads, re-bgzip never discovers a default index:
+/// `-I` is mandatory, matching bgzip ("Index file name expected").
+fn load_rebgzip_index(args: &Args) -> Result<Vec<bgzf::GziEntry>> {
+    let index_path = args
+        .index_name
+        .clone()
+        .context("an index name (-I) is required with --rebgzip")?;
+    bgzf::read_gzi(BufReader::with_capacity(
+        1 << 20,
+        File::open(&index_path).context("opening .gzi index")?,
+    ))
+}
 /// Determine the default decompressed output path by stripping known suffixes.
 /// Returns None if the path does not have a recognised compressed suffix.
 fn stripped_suffix(path: &std::path::Path) -> Option<PathBuf> {
@@ -255,6 +270,17 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
             )?;
         } else if args.decompress {
             bgzf::decompress(input, output)?;
+        } else if args.rebgzip {
+            // -d/-t/-b already handled above take precedence over -g,
+            // matching bgzip; here -g re-blocks the raw input bytes.
+            let index = load_rebgzip_index(args)?;
+            bgzf::rebgzip(
+                input,
+                &mut output,
+                args.level,
+                args.threads as usize,
+                &index,
+            )?;
         } else {
             bgzf::compress(input, output, args.level, args.threads as usize)?;
         }
@@ -285,6 +311,7 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
     let threads = args.threads as usize;
     let is_index = args.index;
     let is_decompress = args.decompress;
+    let is_rebgzip = args.rebgzip;
 
     if is_index {
         let mut input = open_input(path)?;
@@ -306,6 +333,12 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
         let mut input = open_input(path)?;
         stream_file_atomic(&final_output, args.force, |w| {
             bgzf::decompress(&mut input, &mut *w)
+        })?;
+    } else if is_rebgzip {
+        let index = load_rebgzip_index(args)?;
+        let mut input = open_input(path)?;
+        stream_file_atomic(&final_output, args.force, |w| {
+            bgzf::rebgzip(&mut input, &mut *w, level, threads, &index)
         })?;
     } else {
         let mut input = open_input(path)?;
@@ -330,9 +363,9 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
 fn main() {
     let args = Args::parse();
 
-    // Phase 4: -g / --rebgzip stub
-    if args.rebgzip {
-        eprintln!("tarabg: --rebgzip is not yet implemented");
+    // -g cannot be combined with producing an index, matching bgzip.
+    if args.rebgzip && (args.index || args.reindex) {
+        eprintln!("tarabg: can't produce an index and rebgzip simultaneously");
         process::exit(1);
     }
 

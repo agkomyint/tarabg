@@ -174,6 +174,113 @@ pub fn compress_indexed<R: Read, W: Write>(
     Ok(entries)
 }
 
+/// Compress one batch of chunks in parallel and write the blocks in order.
+fn flush_batch(
+    pool: &rayon::ThreadPool,
+    batch: &mut Vec<Vec<u8>>,
+    output: &mut impl Write,
+    level: u32,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let blocks: Vec<Vec<u8>> = pool.install(|| {
+        batch
+            .par_iter()
+            .map(|c| compress_block(c, level))
+            .collect::<Result<Vec<_>>>()
+    })?;
+    for block in &blocks {
+        output.write_all(block)?;
+    }
+    batch.clear();
+    Ok(())
+}
+
+/// Re-bgzip: compress `input` as opaque bytes, split into BGZF blocks at the
+/// uncompressed offsets listed in `index` (the first block starting at 0 is
+/// implicit, as in `.gzi`).
+///
+/// This mirrors `bgzip -g -I index`: the input is NOT decompressed first, so
+/// re-blocking an existing file (for example at a new `-l` level) preserves
+/// the original uncompressed block boundaries. Segments larger than one BGZF
+/// block (huge index gaps, or an empty index) are sub-split, so peak memory
+/// stays bounded to roughly `batch_size * MAX_UNCOMPRESSED_BLOCK` plus a
+/// small spill buffer — never the whole input.
+pub fn rebgzip<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+    level: u32,
+    threads: usize,
+    index: &[GziEntry],
+) -> Result<()> {
+    let mut bounds: Vec<u64> = index.iter().map(|(_, u)| *u).filter(|&u| u > 0).collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let batch_size = threads.max(1) * 4;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build()?;
+    // Cap the spill buffer so a pathological index gap cannot grow memory
+    // without bound; overflow is emitted as plain MAX-sized sub-blocks.
+    const SPILL_CAP: usize = 1 << 20;
+
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut pos: u64 = 0; // uncompressed offset of pending[0]
+    let mut bi: usize = 0; // next boundary in bounds
+
+    // Move the first `take` bytes of pending into the batch, sub-splitting
+    // anything larger than one BGZF block.
+    let emit = |pending: &mut Vec<u8>, take: usize, batch: &mut Vec<Vec<u8>>| {
+        let seg: Vec<u8> = pending.drain(..take).collect();
+        for piece in seg.chunks(MAX_UNCOMPRESSED_BLOCK) {
+            batch.push(piece.to_vec());
+        }
+    };
+
+    loop {
+        let chunk = match read_chunk(&mut input)? {
+            None => break,
+            Some(c) => c,
+        };
+        pending.extend_from_slice(&chunk);
+
+        // Emit every boundary now fully buffered.
+        while bi < bounds.len() && bounds[bi] <= pos + pending.len() as u64 {
+            let take = (bounds[bi] - pos) as usize;
+            if take > 0 {
+                emit(&mut pending, take, &mut batch);
+            }
+            pos = bounds[bi];
+            bi += 1;
+        }
+        // Bound memory when the next boundary is far away (or absent).
+        while pending.len() > SPILL_CAP {
+            emit(&mut pending, MAX_UNCOMPRESSED_BLOCK, &mut batch);
+            pos += MAX_UNCOMPRESSED_BLOCK as u64;
+        }
+        if batch.len() >= batch_size {
+            flush_batch(&pool, &mut batch, &mut output, level)?;
+        }
+    }
+
+    // Flush the tail (a boundary exactly at EOF yields no empty block).
+    // (`pos` is not advanced here — nothing reads offsets past EOF.)
+    while !pending.is_empty() {
+        let take = pending.len().min(MAX_UNCOMPRESSED_BLOCK);
+        emit(&mut pending, take, &mut batch);
+        if batch.len() >= batch_size {
+            flush_batch(&pool, &mut batch, &mut output, level)?;
+        }
+    }
+    flush_batch(&pool, &mut batch, &mut output, level)?;
+
+    output.write_all(&BGZF_EOF)?;
+    Ok(())
+}
+
 // ── Phase 6b: Block-by-block streaming decompression ─────────────────────────
 // Optimized: single-pass parse, two reads per block (header + rest), decode
 // directly from the payload slice. No reconstructed-block copy and no second

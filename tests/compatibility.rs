@@ -260,3 +260,287 @@ fn tarabg_multiple_files() {
     assert!(!file1.exists(), "file1 not removed");
     assert!(!file2.exists(), "file2 not removed");
 }
+
+// ── Phase 4: -g / --rebgzip ───────────────────────────────────────────────
+// Semantics (derived from black-box bgzip 1.19 behavior):
+// - `-I index` is mandatory; without it rebgzip fails.
+// - The input is treated as opaque bytes (never decompressed) and BGZF-
+//   compressed with blocks split at the index's uncompressed offsets.
+// - `-g` cannot be combined with `-i`/`-r`; `-d`/`-t`/`-b`/`-s` win over `-g`.
+
+/// Uncompressed block sizes (ISIZEs, skipping the EOF marker) of a BGZF stream.
+fn bgzf_isizes(data: &[u8]) -> Vec<u32> {
+    let mut sizes = Vec::new();
+    let mut off = 0usize;
+    while off < data.len() {
+        assert_eq!(&data[off..off + 4], &[31, 139, 8, 4], "not a BGZF block");
+        let bsize = u16::from_le_bytes([data[off + 16], data[off + 17]]) as usize + 1;
+        let isize = u32::from_le_bytes(data[off + bsize - 4..off + bsize].try_into().unwrap());
+        if isize != 0 {
+            sizes.push(isize);
+        }
+        off += bsize;
+    }
+    sizes
+}
+
+/// Pseudo-random incompressible bytes (deterministic LCG).
+fn incompressible_bytes(n: usize) -> Vec<u8> {
+    let mut x = 0x12345678u32;
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            (x >> 16) as u8
+        })
+        .collect()
+}
+
+/// Build a multi-block fixture with tarabg alone: returns (raw bytes,
+/// BGZF path, .gzi path). Incompressible input keeps the .gz file larger
+/// than the first index boundary so splits are exercised.
+fn rebgzip_fixture(dir: &std::path::Path) -> (Vec<u8>, PathBuf, PathBuf) {
+    let payload = incompressible_bytes(200_000);
+    let input = dir.join("data.bin");
+    let gz = dir.join("data.bin.gz");
+    let gzi = dir.join("data.bin.gz.gzi");
+    fs::write(&input, &payload).unwrap();
+    let status = Command::new(tarabg())
+        .arg("-i")
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg("-o")
+        .arg(gz.to_str().unwrap())
+        .arg(input.to_str().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "fixture compression failed");
+    assert!(gz.exists() && gzi.exists(), "fixture files missing");
+    (payload, gz, gzi)
+}
+
+fn tarabg_decompress(path: &std::path::Path) -> Vec<u8> {
+    let out = Command::new(tarabg())
+        .args(["-d", "-c", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "decompression failed");
+    out.stdout
+}
+
+/// `-g` without `-I` must fail (bgzip: "Index file name expected").
+#[test]
+fn rebgzip_requires_index() {
+    let dir = tempdir().unwrap();
+    let (_, gz, _) = rebgzip_fixture(dir.path());
+    let status = Command::new(tarabg())
+        .args(["-g", "-c", gz.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(!status.success(), "-g without -I should fail");
+}
+
+/// `-g` cannot be combined with `-i` or `-r`.
+#[test]
+fn rebgzip_rejects_index_creation() {
+    let dir = tempdir().unwrap();
+    let (_, gz, _) = rebgzip_fixture(dir.path());
+    for extra in [&["-i", "-I", "x.gzi"][..], &["-r"][..]] {
+        let mut cmd = Command::new(tarabg());
+        cmd.arg("-g").args(extra).arg("-c").arg(&gz);
+        // -r takes no -c value issue: pass input positionally instead.
+        let status = cmd.status().unwrap();
+        assert!(!status.success(), "-g with {extra:?} should fail");
+    }
+}
+
+/// `-g` output decompresses to the exact input bytes.
+#[test]
+fn rebgzip_stdout_roundtrip() {
+    let dir = tempdir().unwrap();
+    let (_, gz, gzi) = rebgzip_fixture(dir.path());
+    let out = Command::new(tarabg())
+        .arg("-g")
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg("-c")
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rebgzip failed");
+    let recompressed = dir.path().join("re.gz");
+    fs::write(&recompressed, &out.stdout).unwrap();
+    assert_eq!(
+        tarabg_decompress(&recompressed),
+        fs::read(&gz).unwrap(),
+        "rebgzip output must decode to the input bytes"
+    );
+}
+
+/// File-mode `-g`: `x.gz` becomes `x.gz.gz`, input removed unless `-k`.
+#[test]
+fn rebgzip_file_mode() {
+    let tara = tarabg();
+    let dir = tempdir().unwrap();
+    let (_, gz, gzi) = rebgzip_fixture(dir.path());
+    let work = dir.path().join("work.gz");
+    fs::copy(&gz, &work).unwrap();
+
+    let status = Command::new(tara)
+        .arg("-g")
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg(work.to_str().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "file-mode rebgzip failed");
+    let out = dir.path().join("work.gz.gz");
+    assert!(out.exists(), "reblocked output missing");
+    assert!(!work.exists(), "input not removed");
+    assert_eq!(tarabg_decompress(&out), fs::read(&gz).unwrap());
+
+    // -k retains the input.
+    fs::copy(&gz, &work).unwrap();
+    let status = Command::new(tara)
+        .args(["-g", "-k", "-f"])
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg(work.to_str().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rebgzip -k failed");
+    assert!(work.exists(), "input removed despite -k");
+}
+
+/// Against native bgzip: same splits at the index boundaries, same bytes.
+#[test]
+fn rebgzip_matches_bgzip_splits() {
+    let Some(bgzip) = bgzip() else {
+        eprintln!("skipping: bgzip is not installed");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let (_, gz, gzi) = rebgzip_fixture(dir.path());
+
+    let native = Command::new(&bgzip)
+        .arg("-g")
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg("-c")
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "bgzip -g failed");
+    let ours = Command::new(tarabg())
+        .arg("-g")
+        .arg("-I")
+        .arg(gzi.to_str().unwrap())
+        .arg("-c")
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(ours.status.success(), "tarabg -g failed");
+
+    // Both decode (via bgzip) to the exact input bytes...
+    let input_bytes = fs::read(&gz).unwrap();
+    for (label, blob) in [("bgzip", &native.stdout), ("tarabg", &ours.stdout)] {
+        let tmp = dir.path().join(format!("{label}.gz"));
+        fs::write(&tmp, blob).unwrap();
+        assert!(Command::new(&bgzip)
+            .args(["-t", tmp.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+        let dec = Command::new(&bgzip)
+            .args(["-d", "-c", tmp.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(dec.stdout, input_bytes, "{label} bytes mismatch");
+    }
+    // ...and split at the same uncompressed boundaries.
+    assert_eq!(
+        bgzf_isizes(&ours.stdout),
+        bgzf_isizes(&native.stdout),
+        "block splits differ from bgzip"
+    );
+}
+
+/// An empty (0-entry) index falls back to default blocking; bytes exact.
+#[test]
+fn rebgzip_empty_index() {
+    let dir = tempdir().unwrap();
+    let (_, gz, _) = rebgzip_fixture(dir.path());
+    let empty_gzi = dir.path().join("empty.gzi");
+    fs::write(&empty_gzi, 0u64.to_le_bytes()).unwrap();
+    let out = Command::new(tarabg())
+        .arg("-g")
+        .arg("-I")
+        .arg(empty_gzi.to_str().unwrap())
+        .arg("-c")
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rebgzip with empty index failed");
+    let recompressed = dir.path().join("re.gz");
+    fs::write(&recompressed, &out.stdout).unwrap();
+    assert_eq!(tarabg_decompress(&recompressed), fs::read(&gz).unwrap());
+}
+
+/// An index boundary exactly at EOF is a no-op, not a crash
+/// (native bgzip segfaults here; we must stay graceful).
+#[test]
+fn rebgzip_eof_boundary_index() {
+    let dir = tempdir().unwrap();
+    let (_, gz, _) = rebgzip_fixture(dir.path());
+    let len = fs::metadata(&gz).unwrap().len();
+    let mut gzi_bytes = 1u64.to_le_bytes().to_vec();
+    gzi_bytes.extend_from_slice(&9999u64.to_le_bytes());
+    gzi_bytes.extend_from_slice(&len.to_le_bytes());
+    let edge_gzi = dir.path().join("edge.gzi");
+    fs::write(&edge_gzi, &gzi_bytes).unwrap();
+    let out = Command::new(tarabg())
+        .arg("-g")
+        .arg("-I")
+        .arg(edge_gzi.to_str().unwrap())
+        .arg("-c")
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rebgzip with EOF boundary failed");
+    let recompressed = dir.path().join("re.gz");
+    fs::write(&recompressed, &out.stdout).unwrap();
+    assert_eq!(tarabg_decompress(&recompressed), fs::read(&gz).unwrap());
+}
+
+/// `-d`/`-t`/`-b` take precedence over `-g`, matching bgzip.
+#[test]
+fn rebgzip_defers_to_other_modes() {
+    let tara = tarabg();
+    let dir = tempdir().unwrap();
+    let (payload, gz, gzi) = rebgzip_fixture(dir.path());
+
+    // -g -d behaves like -d.
+    let out = Command::new(tara)
+        .args(["-g", "-d", "-c"])
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, payload);
+
+    // -g -t behaves like -t (no output, success).
+    let status = Command::new(tara)
+        .args(["-g", "-t"])
+        .arg(gz.to_str().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // -g -b/-s behaves like a raw range read.
+    let out = Command::new(tara)
+        .args(["-g", "-b", "100", "-s", "50", "-I", gzi.to_str().unwrap()])
+        .arg(gz.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, payload[100..150]);
+}
