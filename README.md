@@ -43,13 +43,13 @@ tarabg --version
 | `-c`  | `--stdout`      | Write to stdout; keep input file                              | ✅ Done     |
 | `-d`  | `--decompress`  | Decompress BGZF input                                         | ✅ Done     |
 | `-t`  | `--test`        | Integrity test; no output written                             | ✅ Done     |
-| `-l`  | `--level`       | Compression level 0–9 (default 6)                             | ✅ Done     |
+| `-l`  | `--level`       | Compression level 0–9, `-1` for default 6 (`--compress-level` alias) | ✅ Done     |
 | `-@`  | `--threads`     | Number of compression worker threads (default 1)              | ✅ Done     |
 | `-k`  | `--keep`        | Keep (do not remove) input file after file-mode operation     | ✅ Done     |
 | `-f`  | `--force`       | Overwrite existing output without prompting                   | ✅ Done     |
 | `-o`  |                 | Write output to FILE instead of default path                  | ✅ Done     |
 | `-i`  | `--index`       | Create `.gzi` index while compressing                         | ✅ Done     |
-| `-I`  |                 | Explicit `.gzi` index file path                               | ✅ Done     |
+| `-I`  | `--index-name`  | Explicit `.gzi` index file path                               | ✅ Done     |
 | `-r`  | `--reindex`     | Rebuild `.gzi` index for an existing BGZF file                | ✅ Done     |
 | `-b`  | `--offset`      | Start decompression at uncompressed byte offset               | ✅ Done     |
 | `-s`  | `--size`        | Write at most N uncompressed bytes (used with `-b`)           | ✅ Done     |

@@ -11,7 +11,11 @@ use std::{
 };
 
 #[derive(Parser, Debug)]
-#[command(version, about = "TaraBG: clean-room BGZF compressor/decompressor")]
+#[command(
+    version,
+    about = "TaraBG: clean-room BGZF compressor/decompressor",
+    args_override_self = true
+)]
 struct Args {
     /// Write output to standard output; keep input file.
     #[arg(short = 'c', long = "stdout")]
@@ -30,7 +34,7 @@ struct Args {
     index: bool,
 
     /// Read or write this .gzi index file.
-    #[arg(short = 'I')]
+    #[arg(short = 'I', long = "index-name")]
     index_name: Option<PathBuf>,
 
     /// Rebuild a .gzi index for an existing BGZF file.
@@ -45,9 +49,9 @@ struct Args {
     #[arg(short = 's', long = "size")]
     size: Option<u64>,
 
-    /// Compression level (0 through 9).
-    #[arg(short = 'l', long = "level", default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
-    level: u32,
+    /// Compression level 0 through 9, or -1 for the default (6).
+    #[arg(short = 'l', long = "level", visible_alias = "compress-level", default_value_t = 6, value_parser = clap::value_parser!(i32).range(-1..=9), allow_hyphen_values = true)]
+    level: i32,
 
     /// Number of compression worker threads (must be >= 1).
     #[arg(short = '@', long = "threads", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
@@ -112,6 +116,16 @@ fn load_rebgzip_index(args: &Args) -> Result<Vec<bgzf::GziEntry>> {
         File::open(&index_path).context("opening .gzi index")?,
     ))
 }
+/// Resolve the requested compression level: `-1` selects the default (6),
+/// matching bgzip. Clap guarantees the range -1..=9.
+fn effective_level(args: &Args) -> u32 {
+    if args.level < 0 {
+        6
+    } else {
+        args.level as u32
+    }
+}
+
 /// Determine the default decompressed output path by stripping known suffixes.
 /// Returns None if the path does not have a recognised compressed suffix.
 fn stripped_suffix(path: &std::path::Path) -> Option<PathBuf> {
@@ -253,10 +267,10 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
         let input = open_input(path)?;
         let stdout = io::stdout();
         let mut output = BufWriter::with_capacity(1 << 20, stdout.lock());
+        let level = effective_level(args);
 
         if args.index {
-            let entries =
-                bgzf::compress_indexed(input, &mut output, args.level, args.threads as usize)?;
+            let entries = bgzf::compress_indexed(input, &mut output, level, args.threads as usize)?;
             let index_path = if let Some(ref p) = args.index_name {
                 p.clone()
             } else if !use_stdin {
@@ -274,15 +288,9 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
             // -d/-t/-b already handled above take precedence over -g,
             // matching bgzip; here -g re-blocks the raw input bytes.
             let index = load_rebgzip_index(args)?;
-            bgzf::rebgzip(
-                input,
-                &mut output,
-                args.level,
-                args.threads as usize,
-                &index,
-            )?;
+            bgzf::rebgzip(input, &mut output, level, args.threads as usize, &index)?;
         } else {
-            bgzf::compress(input, output, args.level, args.threads as usize)?;
+            bgzf::compress(input, output, level, args.threads as usize)?;
         }
         return Ok(());
     }
@@ -307,7 +315,7 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
     // ── File-mode: stream directly to a tmp file, then rename atomically. ────
     // Peak RAM stays bounded (~batch × block + 1 MiB buffers) instead of
     // buffering the entire output in memory.
-    let level = args.level;
+    let level = effective_level(args);
     let threads = args.threads as usize;
     let is_index = args.index;
     let is_decompress = args.decompress;

@@ -544,3 +544,87 @@ fn rebgzip_defers_to_other_modes() {
     assert!(out.status.success());
     assert_eq!(out.stdout, payload[100..150]);
 }
+
+// ── Parser parity (bgzip long aliases, -l -1, repeated flags) ──────────────
+// Derived from black-box bgzip 1.19 probes: `--compress-level` and
+// `--index-name` are accepted, `-l -1` means the default level (identical
+// output to `-l 6`), and repeated flags take the last value.
+
+/// `--index-name` behaves exactly like `-I`.
+#[test]
+fn parser_index_name_alias() {
+    let tara = tarabg();
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("a.txt");
+    let idx = dir.path().join("a.gzi");
+    fs::write(&input, b"alias test payload").unwrap();
+    let status = Command::new(tara)
+        .arg("-i")
+        .arg("--index-name")
+        .arg(idx.to_str().unwrap())
+        .arg("-c")
+        .arg(input.to_str().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "--index-name rejected");
+    assert!(idx.exists(), "--index-name did not create the index");
+}
+
+/// `--compress-level` behaves exactly like `-l`.
+#[test]
+fn parser_compress_level_alias() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("b.txt");
+    fs::write(&input, b"alias test payload".repeat(100)).unwrap();
+    let out = Command::new(tarabg())
+        .arg("--compress-level")
+        .arg("1")
+        .arg("-c")
+        .arg(input.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "--compress-level rejected");
+    let gz = dir.path().join("b.gz");
+    fs::write(&gz, &out.stdout).unwrap();
+    assert_eq!(tarabg_decompress(&gz), fs::read(&input).unwrap());
+}
+
+/// `-l -1` selects the default level: byte-identical output to `-l 6`.
+#[test]
+fn parser_level_minus_one_is_default() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("c.txt");
+    fs::write(&input, b"default level payload".repeat(100)).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(tarabg())
+            .args(args)
+            .arg(input.to_str().unwrap())
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let via_default_flag = run(&["-l", "-1", "-c"]);
+    let via_six = run(&["-l", "6", "-c"]);
+    assert_eq!(via_default_flag, via_six, "-l -1 must equal -l 6");
+}
+
+/// Repeated flags take the last value instead of erroring.
+#[test]
+fn parser_repeated_flag_last_wins() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("d.txt");
+    fs::write(&input, b"repeat payload".repeat(100)).unwrap();
+    let out = Command::new(tarabg())
+        .args(["-l", "1", "-l", "6", "-c"])
+        .arg(input.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "repeated -l rejected");
+    let expected = Command::new(tarabg())
+        .args(["-l", "6", "-c"])
+        .arg(input.to_str().unwrap())
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(out.stdout, expected, "last -l value did not win");
+}
