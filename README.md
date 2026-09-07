@@ -10,7 +10,8 @@ designed for interoperability with HTSlib `bgzip`.
 
 ## Current verification snapshot
 
-- **41/41 Rust tests passing**, including native `bgzip` differential tests
+- **51/51 Rust tests passing**, including a native `bgzip` matrix across
+  levels 0, 1, 6, and 9 with one and four threads
 - HTSlib `1.24-77-g363ef435` successfully validated, identified, indexed, and
   queried TaraBG output from a real 99.2 MB 1000 Genomes chr22 VCF slice
 - Six HTSlib workload runs produced identical headers, 9,747 identical queried
@@ -20,6 +21,9 @@ designed for interoperability with HTSlib `bgzip`.
   TaraBG output was **3.08% larger**, while HTSlib indexing medians tied at
   0.15 s
 - BGZF and `.gzi` libFuzzer targets are included and scheduled in CI
+- Stability fixtures cover every truncated-block boundary, CRC/ISIZE/header/
+  payload corruption, concatenated gzip members, malformed `.gzi` indexes,
+  oversized text records, range boundaries, and parallel output ordering
 
 These measurements describe one reproducible workload, not a universal speed
 claim. Results vary by compression level, thread count, hardware, and data.

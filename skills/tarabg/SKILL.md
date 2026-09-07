@@ -10,7 +10,7 @@ compatibility, interoperability tests, benchmarks, or releases.
 
 ## Current status (2026-09-07)
 
-**41/41 tests passing. All ROADMAP phases 1–8 structurally complete.**
+**51/51 tests passing. All ROADMAP phases 1–8 structurally complete.**
 
 ### Done
 - BGZF engine: read/write, CRC32, ISIZE, EOF marker, all levels 0–9
@@ -21,7 +21,7 @@ compatibility, interoperability tests, benchmarks, or releases.
 - `-g`/`--rebgzip`: re-block per `.gzi` index (requires `-I`, rejects `-i`/`-r`),
   differential-tested against native bgzip block splits
 - Format hardening: ISIZE > 65536 rejected, mid-stream EOF skipped, malformed headers rejected
-- Tests: 17 roundtrip/parser + 24 integration (file-mode, bgzip interop, rebgzip)
+- Tests: 25 roundtrip/parser + 26 integration (file-mode, bgzip interop, rebgzip)
 - CI: Ubuntu + macOS + Windows matrix, native bgzip differential tests on Ubuntu
 - Fuzzing: BGZF and `.gzi` libFuzzer targets with scheduled CI runs
 - Docs: README options table, CHANGELOG, ROADMAP status, benches/README.md

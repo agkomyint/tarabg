@@ -805,3 +805,100 @@ fn default_file_output_preserves_modified_time() {
         .unwrap();
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn native_bgzip_cross_compatibility_matrix() {
+    let Some(bgzip) = bgzip() else {
+        eprintln!("skipping: bgzip is not installed");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let fixtures = [
+        ("empty", Vec::new()),
+        (
+            "records",
+            (0..6_000)
+                .flat_map(|position| {
+                    format!("22\t{position}\trs{position}\tA\tG\t60\tPASS\tDP=40\n").into_bytes()
+                })
+                .collect(),
+        ),
+        ("binary", incompressible_bytes(180_000)),
+    ];
+
+    for (name, payload) in fixtures {
+        let input = dir.path().join(format!("{name}.dat"));
+        fs::write(&input, &payload).unwrap();
+        for level in [0, 1, 6, 9] {
+            for threads in [1, 4] {
+                let level = level.to_string();
+                let threads = threads.to_string();
+                let native = Command::new(&bgzip)
+                    .args(["-l", &level, "-@", &threads, "-c"])
+                    .arg(&input)
+                    .output()
+                    .unwrap();
+                let ours = Command::new(tarabg())
+                    .args(["-l", &level, "-@", &threads, "-c"])
+                    .arg(&input)
+                    .output()
+                    .unwrap();
+                assert!(native.status.success() && ours.status.success());
+
+                let native_path = dir
+                    .path()
+                    .join(format!("native-{name}-{level}-{threads}.gz"));
+                let ours_path = dir.path().join(format!("ours-{name}-{level}-{threads}.gz"));
+                fs::write(&native_path, native.stdout).unwrap();
+                fs::write(&ours_path, ours.stdout).unwrap();
+
+                let native_reads_ours = Command::new(&bgzip)
+                    .args(["-d", "-c"])
+                    .arg(&ours_path)
+                    .output()
+                    .unwrap();
+                let ours_reads_native = Command::new(tarabg())
+                    .args(["-d", "-c"])
+                    .arg(&native_path)
+                    .output()
+                    .unwrap();
+                assert!(native_reads_ours.status.success());
+                assert!(ours_reads_native.status.success());
+                assert_eq!(native_reads_ours.stdout, payload);
+                assert_eq!(ours_reads_native.stdout, payload);
+            }
+        }
+    }
+}
+
+#[test]
+fn cli_integrity_test_rejects_each_corruption_class() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("integrity.txt");
+    fs::write(&input, b"integrity payload".repeat(4_000)).unwrap();
+    let valid = Command::new(tarabg())
+        .args(["-c", input.to_str().unwrap()])
+        .output()
+        .unwrap()
+        .stdout;
+
+    let bsize = u16::from_le_bytes([valid[16], valid[17]]) as usize + 1;
+    let corruptions = [
+        ("header", 0usize),
+        ("payload", 20usize),
+        ("crc", bsize - 8),
+        ("isize", bsize - 4),
+    ];
+    for (name, offset) in corruptions {
+        let mut corrupted = valid.clone();
+        corrupted[offset] ^= 1;
+        let path = dir.path().join(format!("{name}.gz"));
+        fs::write(&path, corrupted).unwrap();
+        let result = Command::new(tarabg()).arg("-t").arg(path).output().unwrap();
+        assert!(!result.status.success(), "accepted {name} corruption");
+        assert!(
+            !result.stderr.is_empty(),
+            "{name} failure had no diagnostic"
+        );
+    }
+}

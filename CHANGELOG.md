@@ -29,6 +29,12 @@
 
 ## [Unreleased]
 
+- Expanded stability suite from 41 to 51 tests: exhaustive single-block
+  truncation prefixes, corruption classes, concatenated gzip members,
+  mid-stream EOF markers, malformed `.gzi` indexes, indexed range boundaries,
+  oversized text records, deterministic parallel ordering, and a native
+  bgzip level/thread cross-compatibility matrix
+
 ## [0.1.0]
 
 ### Added

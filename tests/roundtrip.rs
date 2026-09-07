@@ -225,3 +225,132 @@ fn corrupted_ordinary_gzip_is_rejected() {
     gzip[crc] ^= 1;
     assert!(bgzf::test(Cursor::new(gzip)).is_err());
 }
+
+#[test]
+fn concatenated_gzip_members_decode_in_order() {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let member = |payload: &[u8]| {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(payload).unwrap();
+        encoder.finish().unwrap()
+    };
+    let mut gzip = member(b"first member\n");
+    gzip.extend(member(b"second member\n"));
+
+    bgzf::test(Cursor::new(&gzip)).unwrap();
+    let mut restored = Vec::new();
+    bgzf::decompress(Cursor::new(gzip), &mut restored).unwrap();
+    assert_eq!(restored, b"first member\nsecond member\n");
+}
+
+#[test]
+fn every_truncated_block_prefix_is_rejected() {
+    let block = block::compress_block(b"truncate every boundary", 6).unwrap();
+    for end in 1..block.len() {
+        assert!(
+            block::decompress_bgzf(&block[..end]).is_err(),
+            "accepted truncation at byte {end}"
+        );
+    }
+}
+
+#[test]
+fn trailing_non_bgzf_bytes_are_rejected() {
+    let mut stream = block::compress_block(b"valid first block", 6).unwrap();
+    stream.extend_from_slice(b"junk");
+    assert!(bgzf::test(Cursor::new(&stream)).is_err());
+    assert!(block::decompress_bgzf(&stream).is_err());
+}
+
+#[test]
+fn eof_markers_between_blocks_are_noops() {
+    let mut stream = block::compress_block(b"before", 6).unwrap();
+    stream.extend_from_slice(&block::BGZF_EOF);
+    stream.extend(block::compress_block(b"after", 6).unwrap());
+    stream.extend_from_slice(&block::BGZF_EOF);
+
+    bgzf::test(Cursor::new(&stream)).unwrap();
+    let mut restored = Vec::new();
+    bgzf::decompress(Cursor::new(stream), &mut restored).unwrap();
+    assert_eq!(restored, b"beforeafter");
+}
+
+#[test]
+fn malformed_gzi_shapes_and_order_are_rejected() {
+    for malformed in [Vec::new(), vec![0; 7], 1u64.to_le_bytes().to_vec()] {
+        assert!(bgzf::read_gzi(Cursor::new(malformed)).is_err());
+    }
+
+    let mut duplicate = 2u64.to_le_bytes().to_vec();
+    for entry in [(10u64, 20u64), (10, 30)] {
+        duplicate.extend_from_slice(&entry.0.to_le_bytes());
+        duplicate.extend_from_slice(&entry.1.to_le_bytes());
+    }
+    assert!(bgzf::read_gzi(Cursor::new(duplicate)).is_err());
+
+    let mut descending = 2u64.to_le_bytes().to_vec();
+    for entry in [(10u64, 30u64), (20, 25)] {
+        descending.extend_from_slice(&entry.0.to_le_bytes());
+        descending.extend_from_slice(&entry.1.to_le_bytes());
+    }
+    assert!(bgzf::read_gzi(Cursor::new(descending)).is_err());
+}
+
+#[test]
+fn indexed_ranges_cover_boundaries_and_eof() {
+    let payload = (0..200_000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+    let mut compressed = Vec::new();
+    let index = bgzf::compress_indexed(Cursor::new(&payload), &mut compressed, 6, 4).unwrap();
+
+    for (offset, size) in [
+        (0, 1),
+        (65_279, 2),
+        (65_280, 65_280),
+        (199_999, 1),
+        (200_000, 1),
+    ] {
+        let mut restored = Vec::new();
+        bgzf::decompress_range(
+            Cursor::new(&compressed),
+            &mut restored,
+            offset,
+            Some(size),
+            Some(&index),
+        )
+        .unwrap();
+        let start = offset.min(payload.len() as u64) as usize;
+        let end = start.saturating_add(size as usize).min(payload.len());
+        assert_eq!(restored, payload[start..end], "range {offset}+{size}");
+    }
+}
+
+#[test]
+fn parallel_compression_is_deterministic_and_ordered() {
+    let payload = (0..1_000_000)
+        .map(|n| ((n * 31 + n / 17) % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut single = Vec::new();
+    let mut parallel = Vec::new();
+    bgzf::compress(Cursor::new(&payload), &mut single, 6, 1).unwrap();
+    bgzf::compress(Cursor::new(&payload), &mut parallel, 6, 8).unwrap();
+    assert_eq!(parallel, single);
+}
+
+#[test]
+fn text_mode_handles_records_larger_than_a_block() {
+    let mut payload = b"##fileformat=VCFv4.2\n#CHROM\tPOS\n".to_vec();
+    payload.extend(std::iter::repeat_n(
+        b'X',
+        block::MAX_UNCOMPRESSED_BLOCK * 2 + 17,
+    ));
+    payload.push(b'\n');
+    payload.extend_from_slice(b"22\t1\n");
+
+    let mut compressed = Vec::new();
+    bgzf::compress_auto(Cursor::new(&payload), &mut compressed, 6, 4).unwrap();
+    let mut restored = Vec::new();
+    bgzf::decompress(Cursor::new(compressed), &mut restored).unwrap();
+    assert_eq!(restored, payload);
+}
