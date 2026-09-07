@@ -4,4 +4,12 @@
 /benches/results/*.csv
 /benches/results/*.gz
 /benches/results/synthetic.vcf
+/benches/results/*.bin
+/benches/results/*.gzi
 /dist/
+# Local environment junk (never commit)
+/cc
+/gcc
+/Library/
+/micromamba.tar.bz2
+/miniconda.exe

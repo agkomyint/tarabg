@@ -1,40 +1,350 @@
 mod bgzf;
 mod block;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
-use std::{fs::File, io::{self, BufReader, BufWriter, Read}, path::PathBuf};
+use std::{
+    fs::File,
+    io::{self, BufReader, BufWriter, Read, Write},
+    path::PathBuf,
+    process,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "TaraBG: clean-room BGZF compressor/decompressor")]
 struct Args {
-    /// Write output to standard output.
-    #[arg(short = 'c')]
+    /// Write output to standard output; keep input file.
+    #[arg(short = 'c', long = "stdout")]
     stdout: bool,
+
     /// Decompress BGZF input.
-    #[arg(short = 'd')]
+    #[arg(short = 'd', long = "decompress")]
     decompress: bool,
+
     /// Test BGZF integrity; no output is written.
-    #[arg(short = 't')]
+    #[arg(short = 't', long = "test")]
     test: bool,
+
+    /// Create a .gzi index while compressing.
+    #[arg(short = 'i', long = "index")]
+    index: bool,
+
+    /// Read or write this .gzi index file.
+    #[arg(short = 'I')]
+    index_name: Option<PathBuf>,
+
+    /// Rebuild a .gzi index for an existing BGZF file.
+    #[arg(short = 'r', long = "reindex")]
+    reindex: bool,
+
+    /// Start decompression at this uncompressed byte offset (requires file input).
+    #[arg(short = 'b', long = "offset")]
+    offset: Option<u64>,
+
+    /// Write at most this many uncompressed bytes (use with -b).
+    #[arg(short = 's', long = "size")]
+    size: Option<u64>,
+
     /// Compression level (0 through 9).
-    #[arg(short = 'l', default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
+    #[arg(short = 'l', long = "level", default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
     level: u32,
-    /// Number of compression worker threads.
-    #[arg(short = '@', default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+
+    /// Number of compression worker threads (must be >= 1).
+    #[arg(short = '@', long = "threads", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     threads: u32,
-    /// Input file, or omit / use - for standard input.
-    input: Option<PathBuf>,
+
+    /// Keep (don't remove) input file during default file-mode operations.
+    #[arg(short = 'k', long = "keep")]
+    keep: bool,
+
+    /// Force overwrite of existing output file without prompting.
+    #[arg(short = 'f', long = "force")]
+    force: bool,
+
+    /// Write output to FILE instead of the default path or stdout.
+    #[arg(short = 'o')]
+    output: Option<PathBuf>,
+
+    /// Treat input as binary (always the case for TaraBG; accepted for compatibility).
+    #[arg(long = "binary")]
+    binary: bool,
+
+    /// Re-bgzip: not yet implemented.
+    #[arg(short = 'g', long = "rebgzip")]
+    rebgzip: bool,
+
+    /// Input file(s), or omit / use - for standard input.
+    #[arg(value_name = "FILE")]
+    inputs: Vec<PathBuf>,
 }
 
-fn reader(path: &Option<PathBuf>) -> Result<Box<dyn Read>> {
-    match path.as_deref() { Some(p) if p.as_os_str() != "-" => Ok(Box::new(BufReader::new(File::open(p).with_context(|| format!("opening {}", p.display()))?))), _ => Ok(Box::new(io::stdin())) }
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn open_input(path: &PathBuf) -> Result<Box<dyn Read>> {
+    if path.as_os_str() == "-" {
+        Ok(Box::new(io::stdin()))
+    } else {
+        Ok(Box::new(BufReader::with_capacity(
+            1 << 20,
+            File::open(path).with_context(|| format!("opening {}", path.display()))?,
+        )))
+    }
 }
-fn main() -> Result<()> {
+
+fn is_stdin(path: &std::path::Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// Determine the default decompressed output path by stripping known suffixes.
+/// Returns None if the path does not have a recognised compressed suffix.
+fn stripped_suffix(path: &std::path::Path) -> Option<PathBuf> {
+    let name = path.to_str()?;
+    for suffix in &[".bgzf", ".bgz", ".gz"] {
+        if let Some(stem) = name.strip_suffix(suffix) {
+            return Some(PathBuf::from(stem));
+        }
+    }
+    None
+}
+
+/// Write `data` to `final_path`, using a `.tmp` intermediary. Respects `force`.
+fn write_file_atomic(data: &[u8], final_path: &PathBuf, force: bool) -> Result<()> {
+    check_overwrite(final_path, force)?;
+    let tmp_path = tmp_path_for(final_path);
+    {
+        let mut f = BufWriter::with_capacity(
+            1 << 20,
+            File::create(&tmp_path)
+                .with_context(|| format!("creating {}", tmp_path.display()))?,
+        );
+        f.write_all(data)?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp_path, final_path)
+        .with_context(|| format!("renaming tmp to {}", final_path.display()))?;
+    Ok(())
+}
+
+fn check_overwrite(final_path: &PathBuf, force: bool) -> Result<()> {
+    if final_path.exists() && !force {
+        bail!(
+            "output file already exists: {}  (use -f to overwrite)",
+            final_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn tmp_path_for(final_path: &PathBuf) -> PathBuf {
+    PathBuf::from(format!("{}.tmp", final_path.display()))
+}
+
+/// Stream `produce` directly into a tmp file, then atomically rename.
+/// Avoids buffering the entire (possibly multi-GB) output in RAM.
+fn stream_file_atomic(
+    final_path: &PathBuf,
+    force: bool,
+    produce: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
+) -> Result<()> {
+    check_overwrite(final_path, force)?;
+    let tmp_path = tmp_path_for(final_path);
+    {
+        let file = File::create(&tmp_path)
+            .with_context(|| format!("creating {}", tmp_path.display()))?;
+        let mut w = BufWriter::with_capacity(1 << 20, file);
+        produce(&mut w)?;
+        w.flush()?;
+    }
+    std::fs::rename(&tmp_path, final_path)
+        .with_context(|| format!("renaming tmp to {}", final_path.display()))?;
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Per-file processing
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn process_one(path: &PathBuf, args: &Args) -> Result<()> {
+    let use_stdin = is_stdin(path);
+
+    // ── -b / -s random-access range ──────────────────────────────────────────
+    if args.offset.is_some() || args.size.is_some() {
+        if use_stdin {
+            bail!("-b/-s random access requires a file input, not stdin");
+        }
+        let index_path = args
+            .index_name
+            .clone()
+            .or_else(|| {
+                let p = PathBuf::from(format!("{}.gzi", path.display()));
+                if p.exists() { Some(p) } else { None }
+            });
+        let index = index_path
+            .filter(|p| p.exists())
+            .map(|p| bgzf::read_gzi(BufReader::with_capacity(1 << 20, File::open(&p).context("opening .gzi index")?)))
+            .transpose()?;
+        let input = open_input(path)?;
+        let stdout = io::stdout();
+        let output = BufWriter::with_capacity(1 << 20, stdout.lock());
+        return bgzf::decompress_range(
+            input,
+            output,
+            args.offset.unwrap_or(0),
+            args.size,
+            index.as_deref(),
+        );
+    }
+
+    // ── -t test ──────────────────────────────────────────────────────────────
+    if args.test {
+        return bgzf::test(open_input(path)?);
+    }
+
+    // ── -r reindex ───────────────────────────────────────────────────────────
+    if args.reindex {
+        let entries = bgzf::reindex(open_input(path)?)?;
+        let index_path = if let Some(ref p) = args.index_name {
+            p.clone()
+        } else if !use_stdin {
+            // Default: <input>.gzi
+            PathBuf::from(format!("{}.gzi", path.display()))
+        } else {
+            bail!("an index name (-I) is required when input is stdin");
+        };
+        return bgzf::write_gzi(
+            BufWriter::new(File::create(&index_path).context("creating .gzi index")?),
+            &entries,
+        );
+    }
+
+    // ── Determine output mode: stdout vs file ─────────────────────────────────
+    let to_stdout = args.stdout || use_stdin || args.output.as_deref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+
+    if to_stdout {
+        // ── Stdout pipeline ───────────────────────────────────────────────────
+        let input = open_input(path)?;
+        let stdout = io::stdout();
+        let mut output = BufWriter::with_capacity(1 << 20, stdout.lock());
+
+        if args.index {
+            let entries = bgzf::compress_indexed(input, &mut output, args.level, args.threads as usize)?;
+            let index_path = if let Some(ref p) = args.index_name {
+                p.clone()
+            } else if !use_stdin {
+                PathBuf::from(format!("{}.gzi", path.display()))
+            } else {
+                bail!("an index name (-I) is required when writing index in stdout mode with stdin input");
+            };
+            bgzf::write_gzi(
+                BufWriter::new(File::create(&index_path).context("creating .gzi index")?),
+                &entries,
+            )?;
+        } else if args.decompress {
+            bgzf::decompress(input, output)?;
+        } else {
+            bgzf::compress(input, output, args.level, args.threads as usize)?;
+        }
+        return Ok(());
+    }
+
+    // ── File-mode ─────────────────────────────────────────────────────────────
+    // Explicit -o overrides default naming.
+    let final_output: PathBuf = if let Some(ref out) = args.output {
+        out.clone()
+    } else if args.decompress {
+        // Default decompression: strip suffix
+        stripped_suffix(path).with_context(|| {
+            format!(
+                "cannot determine output name for '{}'; use -o or ensure the file has a .gz/.bgz/.bgzf suffix",
+                path.display()
+            )
+        })?
+    } else {
+        // Default compression: append .gz
+        PathBuf::from(format!("{}.gz", path.display()))
+    };
+
+    // ── File-mode: stream directly to a tmp file, then rename atomically. ────
+    // Peak RAM stays bounded (~batch × block + 1 MiB buffers) instead of
+    // buffering the entire output in memory.
+    let level = args.level;
+    let threads = args.threads as usize;
+    let is_index = args.index;
+    let is_decompress = args.decompress;
+
+    if is_index {
+        let mut input = open_input(path)?;
+        let mut entries_out: Vec<bgzf::GziEntry> = Vec::new();
+        stream_file_atomic(&final_output, args.force, |w| {
+            entries_out = bgzf::compress_indexed(&mut input, &mut *w, level, threads)?;
+            Ok(())
+        })?;
+        // Determine index path.
+        let index_path = if let Some(ref p) = args.index_name {
+            p.clone()
+        } else {
+            PathBuf::from(format!("{}.gzi", final_output.display()))
+        };
+        let mut idx_bytes: Vec<u8> = Vec::new();
+        bgzf::write_gzi(&mut idx_bytes, &entries_out)?;
+        write_file_atomic(&idx_bytes, &index_path, args.force)?;
+    } else if is_decompress {
+        let mut input = open_input(path)?;
+        stream_file_atomic(&final_output, args.force, |w| {
+            bgzf::decompress(&mut input, &mut *w)
+        })?;
+    } else {
+        let mut input = open_input(path)?;
+        stream_file_atomic(&final_output, args.force, |w| {
+            bgzf::compress(&mut input, &mut *w, level, threads)
+        })?;
+    }
+
+    // Remove input only on success and when not keeping it.
+    if !args.keep && args.output.is_none() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("removing input file {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// main
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn main() {
     let args = Args::parse();
-    if args.test { return bgzf::test(reader(&args.input)?); }
-    let input = reader(&args.input)?;
-    // Phase 1 deliberately only writes stdout: this makes pipelines safe and explicit.
-    let stdout = io::stdout(); let output = BufWriter::new(stdout.lock());
-    if args.decompress { bgzf::decompress(input, output) } else { bgzf::compress(input, output, args.level, args.threads as usize) }
+
+    // Phase 4: -g / --rebgzip stub
+    if args.rebgzip {
+        eprintln!("tarabg: --rebgzip is not yet implemented");
+        process::exit(1);
+    }
+
+    // Phase 4: -t and -d together is ambiguous.
+    if args.test && args.decompress {
+        eprintln!("tarabg: -t (test) and -d (decompress) cannot be combined");
+        process::exit(1);
+    }
+
+    // Normalise inputs: if none provided, use stdin placeholder.
+    let inputs: Vec<PathBuf> = if args.inputs.is_empty() {
+        vec![PathBuf::from("-")]
+    } else {
+        args.inputs.clone()
+    };
+
+    let mut any_error = false;
+    for path in &inputs {
+        if let Err(e) = process_one(path, &args) {
+            eprintln!("tarabg: {}: {e:#}", path.display());
+            any_error = true;
+        }
+    }
+    if any_error {
+        process::exit(1);
+    }
 }

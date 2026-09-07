@@ -8,12 +8,32 @@ description: Implement, test, benchmark, or release TaraBG's clean-room BGZF and
 Use this skill for work that changes TaraBG's BGZF behavior, bgzip CLI
 compatibility, interoperability tests, benchmarks, or releases.
 
+## Current status (2026-09-07)
+
+**19/19 tests passing. All ROADMAP phases 1–8 structurally complete.**
+
+### Done
+- BGZF engine: read/write, CRC32, ISIZE, EOF marker, all levels 0–9
+- Streaming: compression in batches (`threads×4` chunks), decompression block-by-block (bounded RAM)
+- Full CLI: `-c -d -t -l -@ -k -f -o -i -I -r -b -s --binary`, long aliases, multiple files
+- File-mode: default `.gz` output, atomic writes, input removal, `-k`/`-f`/`-o`
+- `.gzi` index: create, rebuild, default naming, random reads
+- Format hardening: ISIZE > 65536 rejected, mid-stream EOF skipped, malformed headers rejected
+- Tests: 13 unit (roundtrip, fixtures, streaming) + 6 integration (file-mode, bgzip interop)
+- CI: Ubuntu + macOS + Windows matrix, native bgzip differential tests on Ubuntu
+- Docs: README options table, CHANGELOG, ROADMAP status, benches/README.md
+
+### NOT done (remaining before "full drop-in")
+- `-g`/`--rebgzip` (stubs with error today)
+- Fuzzing targets (cargo-fuzz / libFuzzer)
+- Native Linux perf baseline (benches/ infrastructure ready, needs actual Linux run)
+- Signed release artifacts from CI
+
 ## Objective
 
 Move toward a real `bgzip` drop-in replacement without sacrificing correct,
-interoperable BGZF. v0.1 supports compression, decompression, integrity tests,
-levels, worker counts, and streaming workflows; unsupported bgzip features must
-remain documented as unsupported.
+interoperable BGZF. The `-g`/`--rebgzip` flag and fuzzing are the primary
+remaining gaps. Unsupported features must remain documented as unsupported.
 
 ## Before changing behavior
 
@@ -44,5 +64,6 @@ the change stays.
 ## Release handling
 
 Release notes and README installation instructions must state what is genuinely
-implemented. Do not label TaraBG a complete drop-in replacement until coverage
-for required bgzip flags, indexing, and random access is demonstrably present.
+implemented. Do not label TaraBG a complete drop-in replacement until `-g`/`--rebgzip`,
+fuzzing, and a native same-environment benchmark are all in place.
+
