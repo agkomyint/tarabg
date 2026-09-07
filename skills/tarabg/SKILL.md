@@ -10,7 +10,7 @@ compatibility, interoperability tests, benchmarks, or releases.
 
 ## Current status (2026-09-07)
 
-**27/27 tests passing. All ROADMAP phases 1–8 structurally complete.**
+**41/41 tests passing. All ROADMAP phases 1–8 structurally complete.**
 
 ### Done
 - BGZF engine: read/write, CRC32, ISIZE, EOF marker, all levels 0–9
@@ -21,20 +21,20 @@ compatibility, interoperability tests, benchmarks, or releases.
 - `-g`/`--rebgzip`: re-block per `.gzi` index (requires `-I`, rejects `-i`/`-r`),
   differential-tested against native bgzip block splits
 - Format hardening: ISIZE > 65536 rejected, mid-stream EOF skipped, malformed headers rejected
-- Tests: 13 unit (roundtrip, fixtures, streaming) + 14 integration (file-mode, bgzip interop, rebgzip)
+- Tests: 17 roundtrip/parser + 24 integration (file-mode, bgzip interop, rebgzip)
 - CI: Ubuntu + macOS + Windows matrix, native bgzip differential tests on Ubuntu
+- Fuzzing: BGZF and `.gzi` libFuzzer targets with scheduled CI runs
 - Docs: README options table, CHANGELOG, ROADMAP status, benches/README.md
 
 ### NOT done (remaining before "full drop-in")
-- Fuzzing targets (cargo-fuzz / libFuzzer)
 - Native Linux perf baseline (benches/ infrastructure ready, needs actual Linux run)
-- Signed release artifacts from CI
+- Confirm the signed/checksummed multi-platform workflow in a published release
 
 ## Objective
 
 Move toward a real `bgzip` drop-in replacement without sacrificing correct,
-interoperable BGZF. Fuzzing is the primary remaining gap. Unsupported features
-must remain documented as unsupported.
+interoperable BGZF. The bare-metal native Linux performance baseline is the
+primary remaining gap. Unsupported features must remain documented as unsupported.
 
 ## Before changing behavior
 
@@ -67,4 +67,3 @@ the change stays.
 Release notes and README installation instructions must state what is genuinely
 implemented. Do not label TaraBG a complete drop-in replacement until fuzzing
 and a native same-environment benchmark are both in place.
-

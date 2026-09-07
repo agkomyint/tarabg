@@ -131,3 +131,17 @@ fastest integrity check in most cells.
 - `perf stat -d` hotspot profiling was not possible here (no PMU in WSL2);
   a native-Linux `perf` pass is still the right gate before optimizing
   further.
+
+## HTSlib downstream workload
+
+Use `htslib-workload.sh` to have one HTSlib build validate, identify, index,
+and region-query VCF BGZF produced by both HTSlib bgzip and TaraBG:
+
+```bash
+benches/htslib-workload.sh INPUT.vcf target/release/tarabg HTSLIB_BIN_DIR OUTPUT_DIR
+```
+
+The harness also compares headers, query results, and decompressed SHA-256
+hashes, and records compression/index timing and peak RSS. It refuses to
+overwrite an existing result directory. The 2026-09-07 audit is recorded in
+`compatibility/htslib-workload-audit-2026-09-07.md`.

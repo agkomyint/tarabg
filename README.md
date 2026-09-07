@@ -4,9 +4,27 @@ TaraBG is a clean-room Rust implementation of BGZF (Blocked GZIP Format),
 designed for interoperability with HTSlib `bgzip`.
 
 > [!IMPORTANT]
-> **v0.2.0 status:** TaraBG is not yet a complete bgzip replacement. See the
+> **v0.3.0 status:** TaraBG is not yet a complete bgzip replacement. See the
 > "Supported options" table below for what is and is not implemented, and
 > [CHANGELOG.md](CHANGELOG.md) for what changed since v0.1.0.
+
+## Current verification snapshot
+
+- **41/41 Rust tests passing**, including native `bgzip` differential tests
+- HTSlib `1.24-77-g363ef435` successfully validated, identified, indexed, and
+  queried TaraBG output from a real 99.2 MB 1000 Genomes chr22 VCF slice
+- Six HTSlib workload runs produced identical headers, 9,747 identical queried
+  records, and decompressed SHA-256 hashes matching the source
+- At level 6 with four threads in the same WSL2 Linux environment, median
+  compression time was **0.15 s for TaraBG vs 0.21 s for bgzip (1.40x faster)**;
+  TaraBG output was **3.08% larger**, while HTSlib indexing medians tied at
+  0.15 s
+- BGZF and `.gzi` libFuzzer targets are included and scheduled in CI
+
+These measurements describe one reproducible workload, not a universal speed
+claim. Results vary by compression level, thread count, hardware, and data.
+See [benches/README.md](benches/README.md) for the broader matrix and workload
+reproduction commands.
 
 ## Install
 
@@ -27,11 +45,11 @@ sudo apt install tabix
 
 ### Prebuilt Windows release
 
-Download `tarabg-v0.2.0-windows-x86_64.zip` from the GitHub release, extract
+Download `tarabg-v0.3.0-windows-x86_64.zip` from the GitHub release, extract
 it, then either place `tarabg.exe` on `PATH` or invoke it directly:
 
 ```powershell
-Expand-Archive .\tarabg-v0.2.0-windows-x86_64.zip -DestinationPath .\tarabg
+Expand-Archive .\tarabg-v0.3.0-windows-x86_64.zip -DestinationPath .\tarabg
 $env:Path += ";$PWD\tarabg"
 tarabg --version
 ```
@@ -53,7 +71,7 @@ tarabg --version
 | `-r`  | `--reindex`     | Rebuild `.gzi` index for an existing BGZF file                | ✅ Done     |
 | `-b`  | `--offset`      | Start decompression at uncompressed byte offset               | ✅ Done     |
 | `-s`  | `--size`        | Write at most N uncompressed bytes (used with `-b`)           | ✅ Done     |
-|       | `--binary`      | Treat input as binary (accepted; TaraBG always uses binary)   | ✅ No-op    |
+|       | `--binary`      | Use fixed binary blocks instead of text-aware newline blocks  | ✅ Done     |
 | `-g`  | `--rebgzip`     | Re-block a file per a `.gzi` index (requires `-I`)            | ✅ Done     |
 | `-h`  | `--help`        | Print help                                                    | ✅ Done (clap) |
 |       | `--version`     | Print version                                                 | ✅ Done (clap) |

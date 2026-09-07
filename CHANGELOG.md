@@ -12,14 +12,22 @@
   reconstructed-block copy); `test`/`reindex`/range reads no longer buffer
   the whole file and stop early once fulfilled
 
-## [Unreleased]
+## [0.3.0] — 2026-09-07
 
 - `-g`/`--rebgzip`: re-block a file per a `.gzi` index (requires `-I`),
   matching black-box bgzip 1.19 behavior (opaque recompression, `-i`/`-r`
   rejected, `-d`/`-t`/`-b` precedence, empty-index fallback). 8 differential
   tests incl. identical block splits vs native bgzip
 - Fuzzing targets for BGZF and `.gzi` parsers
-- Signed/checksummed release artifacts built by CI
+- Default text-aware newline block boundaries and functional `--binary` mode
+- Streaming ordinary gzip decompression and integrity testing
+- CLI compatibility fixes for repeated options, aliases, range reads from
+  stdin, force/suffix semantics, mode precedence, and timestamp preservation
+- Real HTSlib VCF workload harness covering validation, identification,
+  indexing, querying, and byte identity
+- Signed/checksummed Linux, macOS, and Windows release artifacts built by CI
+
+## [Unreleased]
 
 ## [0.1.0]
 

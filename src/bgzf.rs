@@ -1,9 +1,10 @@
 use crate::block::{compress_block, BGZF_EOF, MAX_UNCOMPRESSED_BLOCK};
 use anyhow::{bail, Context, Result};
 use crc32fast::Hasher;
+use flate2::read::MultiGzDecoder;
 use libdeflater::Decompressor;
 use rayon::prelude::*;
-use std::io::{Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 
 pub type GziEntry = (u64, u64);
 
@@ -67,16 +68,114 @@ fn read_chunk(input: &mut impl Read) -> Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
+/// Read one text-aware chunk. Full chunks end immediately after the last
+/// newline that fits, while lines longer than a block fall back to a hard
+/// split. `pending` never grows beyond roughly one block.
+fn read_text_chunk(
+    input: &mut impl Read,
+    pending: &mut Vec<u8>,
+    eof: &mut bool,
+    in_header: &mut bool,
+) -> Result<Option<Vec<u8>>> {
+    while pending.len() < MAX_UNCOMPRESSED_BLOCK && !*eof {
+        let mut buf = vec![0u8; MAX_UNCOMPRESSED_BLOCK - pending.len()];
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            *eof = true;
+        } else {
+            pending.extend_from_slice(&buf[..n]);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(None);
+    }
+    if *in_header {
+        let mut line_start = 0usize;
+        let mut header_end = 0usize;
+        while let Some(relative_end) = pending[line_start..].iter().position(|&byte| byte == b'\n')
+        {
+            let line_end = line_start + relative_end + 1;
+            if matches!(pending.get(line_start), Some(b'#' | b'@')) {
+                header_end = line_end;
+                line_start = line_end;
+            } else {
+                *in_header = false;
+                if header_end > 0 {
+                    return Ok(Some(pending.drain(..header_end).collect()));
+                }
+                break;
+            }
+        }
+        if line_start == 0 && !matches!(pending.first(), Some(b'#' | b'@')) {
+            *in_header = false;
+        }
+    }
+    let take = if pending.len() < MAX_UNCOMPRESSED_BLOCK {
+        pending.len()
+    } else {
+        pending
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(MAX_UNCOMPRESSED_BLOCK, |at| at + 1)
+    };
+    Ok(Some(pending.drain(..take).collect()))
+}
+
+fn input_looks_text(input: &mut impl BufRead) -> Result<bool> {
+    let sample = input.fill_buf()?;
+    if sample.is_empty() || sample.contains(&0) {
+        return Ok(false);
+    }
+    Ok(std::str::from_utf8(sample).is_ok())
+}
+
+fn next_chunk(
+    input: &mut impl Read,
+    text: bool,
+    pending: &mut Vec<u8>,
+    eof: &mut bool,
+    in_header: &mut bool,
+) -> Result<Option<Vec<u8>>> {
+    if text {
+        read_text_chunk(input, pending, eof, in_header)
+    } else {
+        read_chunk(input)
+    }
+}
+
 /// Phase 6a: Streaming compression with a bounded pipeline.
 ///
 /// Reads input in batches of `batch_size` chunks, compresses each batch in
 /// parallel (when threads > 1), and writes the resulting blocks immediately.
 /// Peak memory is bounded to roughly `batch_size * MAX_UNCOMPRESSED_BLOCK`.
 pub fn compress<R: Read, W: Write>(
+    input: R,
+    output: W,
+    level: u32,
+    threads: usize,
+) -> Result<()> {
+    compress_mode(input, output, level, threads, false)
+}
+
+/// Compress with lightweight text detection and newline-aware block endings.
+/// Binary callers should use `compress`, which always uses fixed-size chunks.
+pub fn compress_auto<R: Read, W: Write>(
+    input: R,
+    output: W,
+    level: u32,
+    threads: usize,
+) -> Result<()> {
+    let mut input = BufReader::new(input);
+    let text = input_looks_text(&mut input)?;
+    compress_mode(input, output, level, threads, text)
+}
+
+fn compress_mode<R: Read, W: Write>(
     mut input: R,
     mut output: W,
     level: u32,
     threads: usize,
+    text: bool,
 ) -> Result<()> {
     let batch_size = threads.max(1) * 4;
     // Build the pool once, outside the batch loop.
@@ -84,11 +183,14 @@ pub fn compress<R: Read, W: Write>(
         .num_threads(threads.max(1))
         .build()?;
 
+    let mut pending = Vec::with_capacity(MAX_UNCOMPRESSED_BLOCK);
+    let mut eof = false;
+    let mut in_header = true;
     loop {
         // Read up to batch_size chunks.
         let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
         for _ in 0..batch_size {
-            match read_chunk(&mut input)? {
+            match next_chunk(&mut input, text, &mut pending, &mut eof, &mut in_header)? {
                 None => break,
                 Some(chunk) => chunks.push(chunk),
             }
@@ -119,10 +221,31 @@ pub fn compress<R: Read, W: Write>(
 /// Same bounded pipeline as `compress`, but accumulates `GziEntry` records
 /// as blocks are written, suitable for creating `.gzi` indexes.
 pub fn compress_indexed<R: Read, W: Write>(
+    input: R,
+    output: W,
+    level: u32,
+    threads: usize,
+) -> Result<Vec<GziEntry>> {
+    compress_indexed_mode(input, output, level, threads, false)
+}
+
+pub fn compress_indexed_auto<R: Read, W: Write>(
+    input: R,
+    output: W,
+    level: u32,
+    threads: usize,
+) -> Result<Vec<GziEntry>> {
+    let mut input = BufReader::new(input);
+    let text = input_looks_text(&mut input)?;
+    compress_indexed_mode(input, output, level, threads, text)
+}
+
+fn compress_indexed_mode<R: Read, W: Write>(
     mut input: R,
     mut output: W,
     level: u32,
     threads: usize,
+    text: bool,
 ) -> Result<Vec<GziEntry>> {
     let batch_size = threads.max(1) * 4;
     // Build the pool once, outside the batch loop.
@@ -136,11 +259,14 @@ pub fn compress_indexed<R: Read, W: Write>(
     // Track whether we have written any block at all (the first block's entry is implicit).
     let mut block_number = 0usize;
 
+    let mut pending = Vec::with_capacity(MAX_UNCOMPRESSED_BLOCK);
+    let mut eof = false;
+    let mut in_header = true;
     loop {
         // Read up to batch_size chunks.
         let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
         for _ in 0..batch_size {
-            match read_chunk(&mut input)? {
+            match next_chunk(&mut input, text, &mut pending, &mut eof, &mut in_header)? {
                 None => break,
                 Some(chunk) => chunks.push(chunk),
             }
@@ -391,7 +517,26 @@ fn read_decoded_block(r: &mut impl Read) -> Result<Option<(Vec<u8>, usize)>> {
 ///
 /// Reads one BGZF block at a time; writes decompressed bytes immediately.
 /// Peak memory is bounded to one uncompressed block (~65 KiB).
-pub fn decompress<R: Read, W: Write>(mut input: R, mut output: W) -> Result<()> {
+fn is_bgzf_prefix(prefix: &[u8]) -> bool {
+    prefix.len() >= 18
+        && prefix[0..4] == [31, 139, 8, 4]
+        && prefix[12..16] == [b'B', b'C', 2, 0]
+}
+
+pub fn decompress<R: Read, W: Write>(input: R, mut output: W) -> Result<()> {
+    let mut input = BufReader::new(input);
+    let prefix = input.fill_buf()?;
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    if !is_bgzf_prefix(prefix) {
+        if prefix.len() < 3 || prefix[0..3] != [31, 139, 8] {
+            bail!("not a gzip or BGZF stream");
+        }
+        let mut decoder = MultiGzDecoder::new(input);
+        io::copy(&mut decoder, &mut output).context("invalid gzip stream")?;
+        return Ok(());
+    }
     loop {
         match read_decoded_block(&mut input)? {
             None => break,
@@ -405,7 +550,20 @@ pub fn decompress<R: Read, W: Write>(mut input: R, mut output: W) -> Result<()> 
     Ok(())
 }
 
-pub fn test<R: Read>(mut input: R) -> Result<()> {
+pub fn test<R: Read>(input: R) -> Result<()> {
+    let mut input = BufReader::new(input);
+    let prefix = input.fill_buf()?;
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    if !is_bgzf_prefix(prefix) {
+        if prefix.len() < 3 || prefix[0..3] != [31, 139, 8] {
+            bail!("not a gzip or BGZF stream");
+        }
+        let mut decoder = MultiGzDecoder::new(input);
+        io::copy(&mut decoder, &mut io::sink()).context("invalid gzip stream")?;
+        return Ok(());
+    }
     // Streaming integrity check: validate each block without accumulating
     // the full decompressed output (bounded ~65 KiB instead of input size).
     while read_decoded_block(&mut input)?.is_some() {}

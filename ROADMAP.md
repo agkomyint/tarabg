@@ -1,6 +1,6 @@
 # TaraBG roadmap: from v0.1 to a complete bgzip replacement
 
-## Status (as of v0.1)
+## Status (updated 2026-09-07)
 
 Phases 1–6 are complete. Phase 7 (performance baseline) requires native Linux
 hardware and is infrastructure-ready. Phase 8 (release engineering) is in progress.
@@ -13,7 +13,7 @@ Implemented:
 - Multiple positional input files
 - `.gzi` index creation (`-i`), rebuild (`-r`), and random reads (`-b`/`-s`)
 - Long-option aliases for all flags
-- `--binary` (accepted, no-op), `-g` (stub with error)
+- Text-aware default blocks, real `--binary` mode, and `-g`/`--rebgzip`
 - Streaming compression and decompression (bounded memory)
 - Format hardening: ISIZE > 65536 rejected, malformed headers rejected
 

@@ -5,6 +5,11 @@ mod bgzf;
 mod block;
 use std::io::Cursor;
 
+fn first_isize(stream: &[u8]) -> u32 {
+    let bsize = u16::from_le_bytes([stream[16], stream[17]]) as usize + 1;
+    u32::from_le_bytes(stream[bsize - 4..bsize].try_into().unwrap())
+}
+
 // ── Existing tests ────────────────────────────────────────────────────────────
 
 #[test]
@@ -161,4 +166,62 @@ fn streaming_decompress_large() {
     let mut out = Vec::new();
     bgzf::decompress(Cursor::new(&compressed), &mut out).unwrap();
     assert_eq!(out, input);
+}
+
+#[test]
+fn auto_text_blocks_end_after_newlines_and_binary_does_not() {
+    let mut input = vec![b'A'; 40_000];
+    input.push(b'\n');
+    input.extend(std::iter::repeat_n(b'B', 40_000));
+    input.push(b'\n');
+
+    let mut text = Vec::new();
+    bgzf::compress_auto(Cursor::new(&input), &mut text, 6, 2).unwrap();
+    assert_eq!(first_isize(&text), 40_001);
+
+    let mut binary = Vec::new();
+    bgzf::compress(Cursor::new(&input), &mut binary, 6, 2).unwrap();
+    assert_eq!(first_isize(&binary), block::MAX_UNCOMPRESSED_BLOCK as u32);
+
+    let mut restored = Vec::new();
+    bgzf::decompress(Cursor::new(text), &mut restored).unwrap();
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn auto_binary_detection_keeps_fixed_splits() {
+    let mut input = vec![0u8; 80_000];
+    input[100] = b'\n';
+    let mut stream = Vec::new();
+    bgzf::compress_auto(Cursor::new(&input), &mut stream, 6, 1).unwrap();
+    assert_eq!(first_isize(&stream), block::MAX_UNCOMPRESSED_BLOCK as u32);
+}
+
+#[test]
+fn ordinary_gzip_streaming_decode_and_test() {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let input = b"ordinary gzip compatibility\n".repeat(20_000);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&input).unwrap();
+    let gzip = encoder.finish().unwrap();
+
+    bgzf::test(Cursor::new(&gzip)).unwrap();
+    let mut restored = Vec::new();
+    bgzf::decompress(Cursor::new(gzip), &mut restored).unwrap();
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn corrupted_ordinary_gzip_is_rejected() {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(b"crc must be checked").unwrap();
+    let mut gzip = encoder.finish().unwrap();
+    let crc = gzip.len() - 8;
+    gzip[crc] ^= 1;
+    assert!(bgzf::test(Cursor::new(gzip)).is_err());
 }

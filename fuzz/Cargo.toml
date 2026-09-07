@@ -1,0 +1,30 @@
+[package]
+name = "tarabg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+anyhow = "1.0"
+crc32fast = "1.4"
+flate2 = "1.1"
+libdeflater = "1"
+libfuzzer-sys = "0.4"
+rayon = "1.10"
+
+[[bin]]
+name = "bgzf_parser"
+path = "fuzz_targets/bgzf_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gzi_parser"
+path = "fuzz_targets/gzi_parser.rs"
+test = false
+doc = false
+bench = false

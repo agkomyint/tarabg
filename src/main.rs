@@ -61,15 +61,15 @@ struct Args {
     #[arg(short = 'k', long = "keep")]
     keep: bool,
 
-    /// Force overwrite of existing output file without prompting.
-    #[arg(short = 'f', long = "force")]
-    force: bool,
+    /// Force unknown suffix handling and/or overwrite (repeat for both).
+    #[arg(short = 'f', long = "force", action = clap::ArgAction::Count)]
+    force: u8,
 
     /// Write output to FILE instead of the default path or stdout.
     #[arg(short = 'o')]
     output: Option<PathBuf>,
 
-    /// Treat input as binary (always the case for TaraBG; accepted for compatibility).
+    /// Do not align text blocks at newline boundaries.
     #[arg(long = "binary")]
     binary: bool,
 
@@ -138,6 +138,37 @@ fn stripped_suffix(path: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+fn forced_decompression_path(path: &Path, force: &mut u8) -> Result<PathBuf> {
+    if let Some(path) = stripped_suffix(path) {
+        return Ok(path);
+    }
+    let stem = path.with_extension("");
+    if stem == path || path.extension().is_none() {
+        bail!("can't find an extension in {} -- please rename", path.display());
+    }
+    if *force == 0 {
+        bail!(
+            "unknown extension .{} -- use -f to decompress to {}",
+            path.extension().unwrap_or_default().to_string_lossy(),
+            stem.display()
+        );
+    }
+    *force -= 1;
+    Ok(stem)
+}
+
+fn preserve_file_times(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = std::fs::metadata(source)?;
+    let times = std::fs::FileTimes::new()
+        .set_accessed(metadata.accessed()?)
+        .set_modified(metadata.modified()?);
+    File::options()
+        .write(true)
+        .open(destination)?
+        .set_times(times)?;
+    Ok(())
+}
+
 /// Write `data` to `final_path`, using a `.tmp` intermediary. Respects `force`.
 fn write_file_atomic(data: &[u8], final_path: &Path, force: bool) -> Result<()> {
     check_overwrite(final_path, force)?;
@@ -198,11 +229,11 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
     let use_stdin = is_stdin(path);
 
     // ── -b / -s random-access range ──────────────────────────────────────────
-    if args.offset.is_some() || args.size.is_some() {
-        if use_stdin {
-            bail!("-b/-s random access requires a file input, not stdin");
-        }
+    if args.offset.is_some() || (args.size.is_some() && args.decompress) {
         let index_path = args.index_name.clone().or_else(|| {
+            if use_stdin {
+                return None;
+            }
             let p = PathBuf::from(format!("{}.gzi", path.display()));
             if p.exists() {
                 Some(p)
@@ -211,7 +242,6 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
             }
         });
         let index = index_path
-            .filter(|p| p.exists())
             .map(|p| {
                 bgzf::read_gzi(BufReader::with_capacity(
                     1 << 20,
@@ -219,6 +249,9 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
                 ))
             })
             .transpose()?;
+        if args.offset.unwrap_or(0) > 0 && index.is_none() {
+            bail!("-b with a non-zero offset requires a .gzi index (use -I)");
+        }
         let input = open_input(path)?;
         let stdout = io::stdout();
         let output = BufWriter::with_capacity(1 << 20, stdout.lock());
@@ -255,6 +288,7 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
 
     // ── Determine output mode: stdout vs file ─────────────────────────────────
     let to_stdout = args.stdout
+        || args.size.is_some()
         || use_stdin
         || args
             .output
@@ -270,7 +304,11 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
         let level = effective_level(args);
 
         if args.index {
-            let entries = bgzf::compress_indexed(input, &mut output, level, args.threads as usize)?;
+            let entries = if args.binary {
+                bgzf::compress_indexed(input, &mut output, level, args.threads as usize)?
+            } else {
+                bgzf::compress_indexed_auto(input, &mut output, level, args.threads as usize)?
+            };
             let index_path = if let Some(ref p) = args.index_name {
                 p.clone()
             } else if !use_stdin {
@@ -290,23 +328,22 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
             let index = load_rebgzip_index(args)?;
             bgzf::rebgzip(input, &mut output, level, args.threads as usize, &index)?;
         } else {
-            bgzf::compress(input, output, level, args.threads as usize)?;
+            if args.binary {
+                bgzf::compress(input, output, level, args.threads as usize)?;
+            } else {
+                bgzf::compress_auto(input, output, level, args.threads as usize)?;
+            }
         }
         return Ok(());
     }
 
     // ── File-mode ─────────────────────────────────────────────────────────────
     // Explicit -o overrides default naming.
+    let mut remaining_force = args.force;
     let final_output: PathBuf = if let Some(ref out) = args.output {
         out.clone()
     } else if args.decompress {
-        // Default decompression: strip suffix
-        stripped_suffix(path).with_context(|| {
-            format!(
-                "cannot determine output name for '{}'; use -o or ensure the file has a .gz/.bgz/.bgzf suffix",
-                path.display()
-            )
-        })?
+        forced_decompression_path(path, &mut remaining_force)?
     } else {
         // Default compression: append .gz
         PathBuf::from(format!("{}.gz", path.display()))
@@ -324,8 +361,12 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
     if is_index {
         let mut input = open_input(path)?;
         let mut entries_out: Vec<bgzf::GziEntry> = Vec::new();
-        stream_file_atomic(&final_output, args.force, |w| {
-            entries_out = bgzf::compress_indexed(&mut input, &mut *w, level, threads)?;
+        stream_file_atomic(&final_output, remaining_force > 0, |w| {
+            entries_out = if args.binary {
+                bgzf::compress_indexed(&mut input, &mut *w, level, threads)?
+            } else {
+                bgzf::compress_indexed_auto(&mut input, &mut *w, level, threads)?
+            };
             Ok(())
         })?;
         // Determine index path.
@@ -336,26 +377,33 @@ fn process_one(path: &Path, args: &Args) -> Result<()> {
         };
         let mut idx_bytes: Vec<u8> = Vec::new();
         bgzf::write_gzi(&mut idx_bytes, &entries_out)?;
-        write_file_atomic(&idx_bytes, &index_path, args.force)?;
+        write_file_atomic(&idx_bytes, &index_path, remaining_force > 0)?;
     } else if is_decompress {
         let mut input = open_input(path)?;
-        stream_file_atomic(&final_output, args.force, |w| {
+        stream_file_atomic(&final_output, remaining_force > 0, |w| {
             bgzf::decompress(&mut input, &mut *w)
         })?;
     } else if is_rebgzip {
         let index = load_rebgzip_index(args)?;
         let mut input = open_input(path)?;
-        stream_file_atomic(&final_output, args.force, |w| {
+        stream_file_atomic(&final_output, remaining_force > 0, |w| {
             bgzf::rebgzip(&mut input, &mut *w, level, threads, &index)
         })?;
     } else {
         let mut input = open_input(path)?;
-        stream_file_atomic(&final_output, args.force, |w| {
-            bgzf::compress(&mut input, &mut *w, level, threads)
+        stream_file_atomic(&final_output, remaining_force > 0, |w| {
+            if args.binary {
+                bgzf::compress(&mut input, &mut *w, level, threads)
+            } else {
+                bgzf::compress_auto(&mut input, &mut *w, level, threads)
+            }
         })?;
     }
 
     // Remove input only on success and when not keeping it.
+    if args.output.is_none() && !use_stdin {
+        preserve_file_times(path, &final_output)?;
+    }
     if !args.keep && args.output.is_none() {
         std::fs::remove_file(path)
             .with_context(|| format!("removing input file {}", path.display()))?;
@@ -377,9 +425,22 @@ fn main() {
         process::exit(1);
     }
 
-    // Phase 4: -t and -d together is ambiguous.
-    if args.test && args.decompress {
-        eprintln!("tarabg: -t (test) and -d (decompress) cannot be combined");
+    if (args.stdout || args.offset.is_some() || args.size.is_some())
+        && args
+            .output
+            .as_deref()
+            .is_some_and(|path| path.as_os_str() != "-")
+    {
+        eprintln!("tarabg: cannot write to an explicit file and stdout at the same time");
+        process::exit(1);
+    }
+
+    if (args.index || args.reindex)
+        && args.output.is_none()
+        && args.index_name.is_some()
+        && args.inputs.len() > 1
+    {
+        eprintln!("tarabg: cannot specify one index filename with multiple input files");
         process::exit(1);
     }
 

@@ -1,4 +1,10 @@
-use std::{fs, io::Write, path::PathBuf, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, SystemTime},
+};
 use tempfile::{tempdir, NamedTempFile};
 
 fn bgzip() -> Option<String> {
@@ -464,6 +470,55 @@ fn rebgzip_matches_bgzip_splits() {
     );
 }
 
+#[test]
+fn text_and_binary_block_splits_match_bgzip_when_available() {
+    let Some(bgzip) = bgzip() else {
+        eprintln!("skipping: bgzip is not installed");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("records.vcf");
+    let mut payload = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n".to_vec();
+    for position in 1..4000 {
+        payload.extend_from_slice(
+            format!("22\t{position}\trs{position}\tA\tG\t60\tPASS\tDP=40;AF=0.5\n").as_bytes(),
+        );
+    }
+    fs::write(&input, &payload).unwrap();
+
+    for extra in [&[][..], &["--binary"][..]] {
+        let native = Command::new(&bgzip)
+            .args(extra)
+            .arg("-c")
+            .arg(&input)
+            .output()
+            .unwrap();
+        let ours = Command::new(tarabg())
+            .args(extra)
+            .arg("-c")
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(native.status.success() && ours.status.success());
+        assert_eq!(
+            bgzf_isizes(&ours.stdout),
+            bgzf_isizes(&native.stdout),
+            "block splits differ for {extra:?}"
+        );
+        let ours_path = dir.path().join(if extra.is_empty() {
+            "ours-text.gz"
+        } else {
+            "ours-binary.gz"
+        });
+        fs::write(&ours_path, &ours.stdout).unwrap();
+        assert!(Command::new(&bgzip)
+            .args(["-t", ours_path.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
 /// An empty (0-entry) index falls back to default blocking; bytes exact.
 #[test]
 fn rebgzip_empty_index() {
@@ -627,4 +682,121 @@ fn parser_repeated_flag_last_wins() {
         .unwrap()
         .stdout;
     assert_eq!(out.stdout, expected, "last -l value did not win");
+}
+
+#[test]
+fn test_and_decompress_combination_is_an_integrity_test() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("test.txt");
+    fs::write(&input, b"test mode").unwrap();
+    let compressed = Command::new(tarabg())
+        .args(["-c", input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let gz = dir.path().join("test.gz");
+    fs::write(&gz, compressed.stdout).unwrap();
+    for flags in [["-t", "-d"], ["-d", "-t"]] {
+        let out = Command::new(tarabg())
+            .args(flags)
+            .arg(&gz)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+    }
+}
+
+#[test]
+fn size_without_decompress_still_compresses_to_stdout() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("size.txt");
+    let payload = b"size alone is a stdout modifier".repeat(100);
+    fs::write(&input, &payload).unwrap();
+    let out = Command::new(tarabg())
+        .args(["-s", "5"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let gz = dir.path().join("size.gz");
+    fs::write(&gz, out.stdout).unwrap();
+    assert_eq!(tarabg_decompress(&gz), payload);
+    assert!(input.exists());
+}
+
+#[test]
+fn indexed_range_from_stdin() {
+    let dir = tempdir().unwrap();
+    let (payload, gz, gzi) = rebgzip_fixture(dir.path());
+    let mut child = Command::new(tarabg())
+        .args(["-b", "100", "-s", "50", "-I"])
+        .arg(&gzi)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let write_result = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&fs::read(gz).unwrap());
+    if let Err(error) = write_result {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, payload[100..150]);
+}
+
+#[test]
+fn force_unknown_suffix_consumes_one_force_level() {
+    let dir = tempdir().unwrap();
+    let raw = dir.path().join("raw.txt");
+    fs::write(&raw, b"unknown extension").unwrap();
+    let compressed = Command::new(tarabg())
+        .args(["-c", raw.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let odd = dir.path().join("payload.odd");
+    fs::write(&odd, compressed.stdout).unwrap();
+
+    let destination = dir.path().join("payload");
+    fs::write(&destination, b"existing").unwrap();
+    let once = Command::new(tarabg())
+        .args(["-d", "-f", "-k"])
+        .arg(&odd)
+        .status()
+        .unwrap();
+    assert!(!once.success(), "one -f must not also overwrite the output");
+    assert_eq!(fs::read(&destination).unwrap(), b"existing");
+
+    let twice = Command::new(tarabg())
+        .args(["-d", "-f", "-f", "-k"])
+        .arg(&odd)
+        .status()
+        .unwrap();
+    assert!(twice.success());
+    assert_eq!(fs::read(destination).unwrap(), b"unknown extension");
+}
+
+#[test]
+fn default_file_output_preserves_modified_time() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("dated.txt");
+    fs::write(&input, b"timestamp").unwrap();
+    let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&input)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(expected))
+        .unwrap();
+    let status = Command::new(tarabg()).arg("-k").arg(&input).status().unwrap();
+    assert!(status.success());
+    let actual = fs::metadata(input.with_extension("txt.gz"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(actual, expected);
 }

@@ -6,17 +6,65 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: macos-14
+            name: macos-aarch64
+          - os: windows-latest
+            name: windows-x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
-      - run: cargo build --release
-      - shell: pwsh
-        run: Compress-Archive -Path target/release/tarabg.exe,README.md,LICENSE-MIT -DestinationPath tarabg-${{ github.ref_name }}-windows-x86_64.zip
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bgzip (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tabix
+      - name: Install bgzip (macOS)
+        if: runner.os == 'macOS'
+        run: brew install htslib
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf tarabg-${{ github.ref_name }}-${{ matrix.name }}.tar.gz -C target/release tarabg -C ../../ README.md LICENSE-MIT
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/tarabg.exe,README.md,LICENSE-MIT -DestinationPath tarabg-${{ github.ref_name }}-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarabg-${{ matrix.name }}
+          path: tarabg-${{ github.ref_name }}-${{ matrix.name }}.*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum tarabg-* > SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
       - uses: softprops/action-gh-release@v2
         with:
-          files: tarabg-${{ github.ref_name }}-windows-x86_64.zip
+          generate_release_notes: true
+          files: dist/*
