@@ -148,12 +148,7 @@ fn next_chunk(
 /// Reads input in batches of `batch_size` chunks, compresses each batch in
 /// parallel (when threads > 1), and writes the resulting blocks immediately.
 /// Peak memory is bounded to roughly `batch_size * MAX_UNCOMPRESSED_BLOCK`.
-pub fn compress<R: Read, W: Write>(
-    input: R,
-    output: W,
-    level: u32,
-    threads: usize,
-) -> Result<()> {
+pub fn compress<R: Read, W: Write>(input: R, output: W, level: u32, threads: usize) -> Result<()> {
     compress_mode(input, output, level, threads, false)
 }
 
@@ -518,9 +513,7 @@ fn read_decoded_block(r: &mut impl Read) -> Result<Option<(Vec<u8>, usize)>> {
 /// Reads one BGZF block at a time; writes decompressed bytes immediately.
 /// Peak memory is bounded to one uncompressed block (~65 KiB).
 fn is_bgzf_prefix(prefix: &[u8]) -> bool {
-    prefix.len() >= 18
-        && prefix[0..4] == [31, 139, 8, 4]
-        && prefix[12..16] == [b'B', b'C', 2, 0]
+    prefix.len() >= 18 && prefix[0..4] == [31, 139, 8, 4] && prefix[12..16] == [b'B', b'C', 2, 0]
 }
 
 pub fn decompress<R: Read, W: Write>(input: R, mut output: W) -> Result<()> {

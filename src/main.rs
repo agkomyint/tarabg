@@ -144,7 +144,10 @@ fn forced_decompression_path(path: &Path, force: &mut u8) -> Result<PathBuf> {
     }
     let stem = path.with_extension("");
     if stem == path || path.extension().is_none() {
-        bail!("can't find an extension in {} -- please rename", path.display());
+        bail!(
+            "can't find an extension in {} -- please rename",
+            path.display()
+        );
     }
     if *force == 0 {
         bail!(

@@ -478,7 +478,8 @@ fn text_and_binary_block_splits_match_bgzip_when_available() {
     };
     let dir = tempdir().unwrap();
     let input = dir.path().join("records.vcf");
-    let mut payload = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n".to_vec();
+    let mut payload =
+        b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n".to_vec();
     for position in 1..4000 {
         payload.extend_from_slice(
             format!("22\t{position}\trs{position}\tA\tG\t60\tPASS\tDP=40;AF=0.5\n").as_bytes(),
@@ -792,7 +793,11 @@ fn default_file_output_preserves_modified_time() {
         .unwrap()
         .set_times(fs::FileTimes::new().set_modified(expected))
         .unwrap();
-    let status = Command::new(tarabg()).arg("-k").arg(&input).status().unwrap();
+    let status = Command::new(tarabg())
+        .arg("-k")
+        .arg(&input)
+        .status()
+        .unwrap();
     assert!(status.success());
     let actual = fs::metadata(input.with_extension("txt.gz"))
         .unwrap()
