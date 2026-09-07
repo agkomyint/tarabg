@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v0.2 (planned)
+## [0.2.0] — 2026-09-07
 
 - Deflate backend switched from zlib-ng to libdeflate (levels map 1:1;
   `-l 0` remains a stored/raw block). Output stays valid BGZF accepted by
@@ -11,10 +11,12 @@
 - Streaming decompression reworked to single-pass block parsing (no
   reconstructed-block copy); `test`/`reindex`/range reads no longer buffer
   the whole file and stop early once fulfilled
-- Phase 7: Native Linux performance baseline
-- Phase 8: CI release artifacts for Linux, macOS, Windows
-- Fuzzing targets for BGZF and .gzi parsers
+
+## [Unreleased]
+
 - `-g`/`--rebgzip` full implementation
+- Fuzzing targets for BGZF and `.gzi` parsers
+- Signed/checksummed release artifacts built by CI
 
 ## [0.1.0]
 

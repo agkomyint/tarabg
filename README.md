@@ -4,8 +4,9 @@ TaraBG is a clean-room Rust implementation of BGZF (Blocked GZIP Format),
 designed for interoperability with HTSlib `bgzip`.
 
 > [!IMPORTANT]
-> **v0.1 status:** TaraBG is not yet a complete bgzip replacement. See the
-> "Supported options" table below for what is and is not implemented.
+> **v0.2.0 status:** TaraBG is not yet a complete bgzip replacement. See the
+> "Supported options" table below for what is and is not implemented, and
+> [CHANGELOG.md](CHANGELOG.md) for what changed since v0.1.0.
 
 ## Install
 
@@ -26,11 +27,11 @@ sudo apt install tabix
 
 ### Prebuilt Windows release
 
-Download `tarabg-v0.1.0-windows-x86_64.zip` from the GitHub release, extract
+Download `tarabg-v0.2.0-windows-x86_64.zip` from the GitHub release, extract
 it, then either place `tarabg.exe` on `PATH` or invoke it directly:
 
 ```powershell
-Expand-Archive .\tarabg-v0.1.0-windows-x86_64.zip -DestinationPath .\tarabg
+Expand-Archive .\tarabg-v0.2.0-windows-x86_64.zip -DestinationPath .\tarabg
 $env:Path += ";$PWD\tarabg"
 tarabg --version
 ```
@@ -148,7 +149,8 @@ bash benches/benchmark.sh sample.vcf target/release/tarabg
 ```
 
 The harness refuses Windows binaries and emits `benches/results/results.csv`.
-See [`benches/README.md`](benches/README.md) for details.
+See [`benches/README.md`](benches/README.md) for details, including how to
+reproduce the v0.2.0 comparison against bgzip 1.19 without root access.
 
 ## Development rule
 
