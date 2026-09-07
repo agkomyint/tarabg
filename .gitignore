@@ -1,0 +1,7 @@
+/target/
+/test.bgz
+/restored.md
+/benches/results/*.csv
+/benches/results/*.gz
+/benches/results/synthetic.vcf
+/dist/

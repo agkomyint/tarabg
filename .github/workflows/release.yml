@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release
+      - shell: pwsh
+        run: Compress-Archive -Path target/release/tarabg.exe,README.md,LICENSE-MIT -DestinationPath tarabg-${{ github.ref_name }}-windows-x86_64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: tarabg-${{ github.ref_name }}-windows-x86_64.zip
