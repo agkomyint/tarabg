@@ -14,3 +14,5 @@
 /micromamba.tar.bz2
 /miniconda.exe
 /.VSCodeCounter/
+# Parallel-agent scratch reports (curate before committing)
+/compatibility/
